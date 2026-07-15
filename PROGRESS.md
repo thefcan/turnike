@@ -15,8 +15,10 @@ update it before session end. Milestone definitions live in the build plan
       /healthz /readyz, slog request-ID logging, graceful shutdown, timeouts
 - [x] M2 — Algorithms in-memory: fixed window, token bucket, sliding window log;
       Limiter interface; 429 + Retry-After + X-RateLimit-* headers
-- [ ] M3 — Redis + Lua: one script per algorithm (EVALSHA), Redis TIME,
-      TTL'd keys, fail-open/fail-closed + circuit breaker, hammer test
+- [x] M3 — Redis + Lua: one atomic script per algorithm (EVALSHA + EVAL
+      self-heal), Redis TIME µs clock, TTL'd keys, on_error policy
+      (fail_open/fail_closed/degrade) + circuit breaker, per-algorithm
+      hammers proving exact quotas across 4 clients × 100 goroutines
 - [ ] M4 — Multi-instance proof: nginx LB → 3 replicas demo compose,
       scripts/demo_bypass.sh, bench/ raw outputs, README comparison table
 - [ ] M5 — Observability: Prometheus metrics, /metrics, Grafana dashboard
@@ -25,27 +27,23 @@ update it before session end. Milestone definitions live in the build plan
 
 ## Next action
 
-Start **M3** (Redis + Lua): one script per algorithm (EVALSHA), sourcing
-time from Redis TIME (not the node's clock) so multiple instances agree,
-TTL'd keys (removes the need for MemoryLimiter's maxKeys cap — see
-Decisions), fail-open/fail-closed as an explicit configurable policy
-(generalizing M2's fixed fail-open), circuit breaker around Redis calls,
-hammer test proving atomicity under real concurrent instances. The
-`Limiter` interface (internal/limiter/limiter.go) and the `Decision`
-shape it returns were designed for this — a `RedisLimiter` implementing
-`Allow(ctx, key, limit) (Decision, error)` is a drop-in for
-`MemoryLimiter`, selected via `limiter.New`'s existing `cfg.Limiter.Backend`
-switch (currently errors "lands in M3" on `redis`). Redis key scheme:
-`turnike:{algo}:{key}` (settled since M0) — note the gateway's own key
-already looks like `{route_prefix}:{algo}:{identity}` end to end via
-`MemoryLimiter`'s `algorithm+":"+key` state key, so EVALSHA scripts can
-reuse that shape directly.
+Start **M4** (multi-instance proof): a demo compose file with nginx
+load-balancing 3 gateway replicas over one shared redis;
+scripts/demo_bypass.sh drives the same identity through the LB twice —
+once with `backend: memory` (each replica grants its own quota → up to
+3× the limit admitted: the bypass) and once with `backend: redis`
+(exactly the limit admitted) — raw outputs land in bench/, README gets
+the comparison table (numbers only from those runs). Building blocks in
+place: the key scheme is instance-agnostic and the identity fingerprint
+deterministic (same X-API-Key → same bucket on every replica),
+docker-compose.dev.yml's redis + healthcheck is the template, and
+serve()'s listener split + drain test keep rolling restarts honest.
+Mind the M1 edge-deployment note: behind nginx every client collapses
+to the LB address, so the demo must send X-API-Key (it should anyway —
+that's the story).
 
-Advisor backlog still open (not M2-coupled, unresolved):
-- Graceful-shutdown test doesn't prove draining (only that run() returns
-  nil after cancel).
-- /healthz//readyz answer every HTTP method; readyz checks have no
-  per-check timeout (resolve when M3's Redis ping lands on /readyz).
+Advisor backlog: empty — #7 (drain proof) and #10 (health method guard
++ readyz timeout) both landed in M3.
 
 ## Decisions
 
@@ -122,6 +120,66 @@ Advisor backlog still open (not M2-coupled, unresolved):
 - Client-cancelled requests log status **499** (nginx convention), not
   the recorder's default 200 — fixed in M2 alongside the rate-limit
   wiring since both touch the same request path.
+- Failure policy (M3, **user-picked in plan review**):
+  `limiter.redis.on_error` ∈ fail_open | fail_closed | **degrade
+  (default)**. degrade = a MemoryLimiter fallback built once at boot
+  inside RedisLimiter answers whenever redis can't (real headers,
+  instance-local quota, over-admission ≤ instances × limit, ≤1 window
+  of double-counting on recovery); fail_closed = gateway 503 +
+  Retry-After derived from the exported `limiter.BreakerCooldown` (no
+  X-RateLimit headers — no quota state to report); fail_open = M2's
+  behavior made explicit. The policy reaches the gateway **only under
+  the redis backend** — memory's at-capacity error always fails open
+  (advisor ship-review catch, pinned by a handler test).
+- Circuit breaker (M3): hand-rolled, consts not knobs — 5 consecutive
+  failures open it, `BreakerCooldown` = 1s to a single half-open probe.
+  `context.Canceled` is neutral (client hung up ≠ redis down); a
+  canceled probe re-opens with `openedAt` untouched so the next caller
+  re-probes immediately (no wedge); the open-transition log carries the
+  underlying error so a script bug can't masquerade as an outage under
+  degrade. `Ping` (readyz) and boot script loads bypass the breaker:
+  probes must report ground truth and must not hold the circuit open.
+- readyz (M3, advisor-ruled): the redis ping is registered as a
+  ReadyCheck **only under fail_closed** — redis is a shared dependency,
+  so an unconditional 503 would drain every instance from the LB at
+  once, manufacturing the outage fail_open/degrade exist to survive.
+  Pinned by TestReadyzReflectsPolicyWhenRedisDown. /healthz + /readyz
+  are GET/HEAD-only (405 + Allow otherwise), each check runs under a 1s
+  const budget, and the not-ready body is generic with the reason
+  logged (the error would leak the redis addr on a public listener).
+- Redis time (M3): scripts source time exclusively from `TIME` in
+  integer µs (exact in Lua float64 to 2^53). fixed_window's grid
+  anchors at the Unix epoch vs the memory backend's Go-zero-time
+  `Truncate` — benign, backends never share state — and because TIME is
+  gettimeofday (not monotonic) the script keeps the stored window when
+  TIME steps backward instead of granting a fresh quota. Every stored
+  number is `string.format`ted (`%d` / `%.17g`); Lua's implicit
+  `tostring` (%.14g) would corrupt µs timestamps and token floats.
+- sliding_window member uniqueness (M3): score = accept-time µs, member
+  = `{µs}-{per-call 64-bit rand/v2 nonce}` passed as ARGV. Two same-µs
+  accepts are real (scripts run back-to-back) and identical members
+  would collapse → silent over-admission; the hammer asserts ZCARD ==
+  rate to falsify. An INCR seq key (second key + TTL lifecycle) and
+  in-script math.random (redis seeds it identically per invocation —
+  same-µs callers collide by construction) were both rejected.
+- go-redis client (M3): Dial/Read/WriteTimeout 1s consts, `MaxRetries:
+  -1` — the breaker owns retry behavior; hidden client retries would
+  mask the failures it counts. Construction never fails on unreachable
+  redis (eager SCRIPT LOAD is best-effort): the process boots under its
+  failure policy instead of crash-looping; under fail_closed + redis
+  never reachable that means serving 503s and staying not-ready — by
+  design.
+- Integration test windows (M3): only 1s / 1m / 1h — they divide the
+  62,135,596,800s Go-zero↔epoch offset so both grids coincide — and
+  hammers use hour-scale windows/refills so "exactly quota" can't be
+  broken by a mid-hammer boundary or refill; the fixed hammer
+  additionally waits out a start within 5s of the hour boundary on
+  redis's own clock. Suite is REDIS_ADDR-gated: unset skips, set but
+  unreachable **fails** (CI can't silently skip).
+- Redis cluster is a non-goal (single `addr`; the sliding-window script
+  would need hash-tagged keys) — documented in the README scope note.
+- Advisor reviews run pinned to the fable model (user instruction,
+  2026-07-15) — `.claude/agents/advisor.md` frontmatter.
 
 ### Open (waiting on user)
 - M7 deploy (Fly.io + managed Redis): do it at all? Accounts/cost are the
@@ -171,3 +229,27 @@ Advisor backlog still open (not M2-coupled, unresolved):
   deterministically reproducing a real 1-ULP-under-1.0 denial; fail-open
   path given test coverage; two README overclaims corrected. Re-verified
   green (`-race`, lint, live curl) after every fix.
+- **2026-07-15** — Session 4: M3 shipped in 14 commits. Advisor consulted
+  three times: (1) backlog pre-review — #7 folded into M3 (the drain
+  test forced run()'s net.Listen/serve split, which M3 needed anyway
+  for the redis Close-after-Shutdown ordering), #10 shaped
+  (GET/HEAD-only + 405, 1s per-check timeout, policy-aware readyz);
+  (2) design pre-review of the Lua/breaker/policy plan — SOUND, four
+  findings folded in before a line was written (hour-window hammers,
+  backward-TIME-step guard, exported BreakerCooldown, ARGV nonce
+  replacing the seq-key design); (3) milestone diff review — SHIP with
+  four advisory findings, all fixed (memory-backend on_error isolation,
+  dead assert, hour-boundary hammer wait, README precision). User
+  picked **degrade** as the on_error default in plan review. Verified:
+  unit + integration green under `-race` against real redis (hammers
+  admit exactly quota from 4 clients × 100 goroutines; SCRIPT FLUSH
+  mid-run self-heals with state intact), lint clean at every commit
+  boundary, plus a live E2E against docker redis + mock upstream:
+  3-allow/1-deny with correct headers, POST /healthz → 405, flush →
+  still 429, `docker compose stop redis` → degrade answers with real
+  headers while readyz stays 200 and the breaker-open log carries the
+  error, restart → probe closes the circuit, fail_closed variant → 503
+  + Retry-After: 1 + readyz 503 with a generic body, SIGTERM → clean
+  drain (exit 0). Field note: Docker Desktop's port forward turns
+  stopped-container dials into ~1s timeouts rather than refusals — the
+  1s client budgets + breaker absorbed it as designed.
