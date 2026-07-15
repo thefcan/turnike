@@ -9,7 +9,7 @@ update it before session end. Milestone definitions live in the build plan
 - [x] Setup — repo created (thefcan/turnike, MIT, About + topics), agent
       workflow scaffolded (CLAUDE.md, advisor agent, ship-milestone +
       bench-report skills)
-- [ ] M0 — Skeleton: module layout, YAML config + tests, Makefile,
+- [x] M0 — Skeleton: module layout, YAML config + tests, Makefile,
       golangci-lint, CI (lint + test -race), docker-compose.dev.yml, mock upstream
 - [ ] M1 — Reverse proxy core: ReverseProxy + route table, X-API-Key identity,
       /healthz /readyz, slog request-ID logging, graceful shutdown, timeouts
@@ -25,11 +25,18 @@ update it before session end. Milestone definitions live in the build plan
 
 ## Next action
 
-Start **M0**: go module (`github.com/thefcan/turnike`), layout
-(cmd/gateway, internal/{proxy,limiter,config,metrics}, mock/), YAML config
-package with table-driven tests, Makefile, .golangci.yml (v2 format),
-GitHub Actions CI, Dockerfile (gateway + mock targets), docker-compose.dev.yml
-(redis + mock upstream), config.example.yaml.
+Start **M1** (reverse proxy core): httputil.ReverseProxy with the route
+table from internal/config (longest prefix wins — already decided and
+documented), client identity = X-API-Key with client-IP fallback, /healthz +
+/readyz, request-ID structured logging (slog), graceful shutdown, timeouts
+everywhere (server Read/Write/Idle + per-upstream). Tests: routing, unknown
+route → 404, header passthrough, dead upstream → 502. Replace the 501 stub
+handler in cmd/gateway/main.go.
+
+Advisor note carried into M1: decide **segment-boundary prefix matching**
+(`/api` matches `/api` and `/api/...`, not `/apiv2`) when the route table
+lands, and document it on the Route type — the uniqueness check already
+treats `/api` == `/api/`.
 
 ## Decisions
 
@@ -39,6 +46,16 @@ GitHub Actions CI, Dockerfile (gateway + mock targets), docker-compose.dev.yml
 - Local checkout: `~/turnike`.
 - Redis key prefix will be `turnike:{algo}:{key}` (renamed from the plan's
   `rategate:` prefix along with the repo).
+- Limit semantics (advisor-reviewed, M0): **rate = requests per window for
+  every algorithm**; for token_bucket, window is the refill interval and
+  defaults to 1s; burst (bucket capacity) is token_bucket-only and rejected
+  elsewhere. Per-key overrides merge field-wise over the base limit, except
+  an override that switches algorithm must be self-contained.
+- Routing: **longest matching prefix wins** (documented in M0, implemented
+  in M1); prefixes differing only by a trailing slash are rejected as
+  duplicates.
+- Toolchain pinned to **Go 1.26** across go.mod, CI and Dockerfile so the
+  race-tested toolchain is the shipped one.
 
 ### Open (waiting on user)
 - M7 deploy (Fly.io + managed Redis): do it at all? Accounts/cost are the
@@ -49,4 +66,10 @@ GitHub Actions CI, Dockerfile (gateway + mock targets), docker-compose.dev.yml
 - **2026-07-15** — Session 1: pre-flight checks (go 1.26.3, gh, docker,
   golangci-lint 2.12.2 all OK), repo created and pushed, agent workflow
   scaffolded. Note: local golangci-lint is v2 → `.golangci.yml` uses the
-  `version: "2"` config format.
+  `version: "2"` config format. M0 shipped: config package (parse +
+  validate + per-key override merge, 20+ table-driven cases), gateway/mock
+  binaries, Makefile, CI (lint + race tests + tidy check), Dockerfile,
+  dev compose (verified: mock echoes JSON, redis PONGs). Advisor review
+  round 1 → FIX FIRST (8 findings), all fixed (limit semantics rework,
+  multi-doc YAML rejection, prefix-collision check, Go version alignment,
+  non-root Docker USER, CI tidy gate, README claim reword).

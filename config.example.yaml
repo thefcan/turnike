@@ -1,0 +1,29 @@
+server:
+  listen: ":8080"
+
+limiter:
+  backend: memory # memory | redis (redis lands in M3)
+  # redis:
+  #   addr: localhost:6379
+
+# Routing: when multiple prefixes match a request path, the longest one wins.
+routes:
+  - prefix: /api/
+    upstream: http://localhost:9000
+    limit:
+      algorithm: token_bucket # token_bucket | fixed_window | sliding_window
+      rate: 10 # requests allowed per window
+      burst: 20 # token_bucket only: bucket capacity
+      # window: for token_bucket the refill interval (optional, default 1s);
+      # required for fixed_window / sliding_window. burst is invalid there.
+    key_overrides:
+      demo-premium-key:
+        rate: 100
+        burst: 200
+
+  - prefix: /search/
+    upstream: http://localhost:9000
+    limit:
+      algorithm: sliding_window
+      rate: 5
+      window: 10s
