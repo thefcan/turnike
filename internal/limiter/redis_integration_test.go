@@ -22,6 +22,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/redis/go-redis/v9"
+
 	"github.com/thefcan/turnike/internal/config"
 )
 
@@ -409,5 +411,186 @@ func TestRedisFixedWindowHammer(t *testing.T) {
 	if got := allowed.Load(); got != rate {
 		t.Errorf("allowed = %d over %d attempts from %d instances, want exactly %d",
 			got, instances*perInstance, instances, rate)
+	}
+}
+
+func TestRedisSlidingWindowParity(t *testing.T) {
+	l := newIntegrationLimiter(t)
+	key := integrationKey(t, l, config.AlgoSlidingWindow)
+	window := time.Hour
+	limit := config.Limit{Algorithm: config.AlgoSlidingWindow, Rate: 3, Window: config.Duration(window)}
+	ctx := context.Background()
+
+	var lastReset time.Time
+	for i, wantRemaining := range []int{2, 1, 0} {
+		dec, err := l.Allow(ctx, key, limit)
+		if err != nil {
+			t.Fatalf("allow %d: %v", i+1, err)
+		}
+		if !dec.Allowed {
+			t.Fatalf("allow %d: denied, want allowed", i+1)
+		}
+		if dec.Remaining != wantRemaining {
+			t.Errorf("allow %d: Remaining = %d, want %d", i+1, dec.Remaining, wantRemaining)
+		}
+		// Reset tracks the NEWEST entry's expiry, so each accepted
+		// request may only push it forward.
+		if dec.Reset.Before(lastReset) {
+			t.Errorf("allow %d: Reset went backward: %v after %v", i+1, dec.Reset, lastReset)
+		}
+		lastReset = dec.Reset
+	}
+
+	for i := 0; i < 2; i++ {
+		dec, err := l.Allow(ctx, key, limit)
+		if err != nil {
+			t.Fatalf("deny %d: %v", i+1, err)
+		}
+		if dec.Allowed {
+			t.Fatalf("deny %d: allowed past rate, want denied", i+1)
+		}
+		if dec.Remaining != 0 {
+			t.Errorf("deny %d: Remaining = %d, want 0", i+1, dec.Remaining)
+		}
+		if dec.RetryAfter <= 0 || dec.RetryAfter > window {
+			t.Errorf("deny %d: RetryAfter = %v, want in (0, %v]", i+1, dec.RetryAfter, window)
+		}
+	}
+
+	stateKey := "turnike:" + config.AlgoSlidingWindow + ":" + key
+	card, err := l.client.ZCard(ctx, stateKey).Result()
+	if err != nil {
+		t.Fatalf("ZCARD: %v", err)
+	}
+	if card != int64(limit.Rate) {
+		t.Errorf("log length after denies = %d, want %d (deny must not append)", card, limit.Rate)
+	}
+	ttl, err := l.client.PTTL(ctx, stateKey).Result()
+	if err != nil {
+		t.Fatalf("PTTL: %v", err)
+	}
+	if ttl <= 0 || ttl > window {
+		t.Errorf("PTTL = %v, want in (0, %v]", ttl, window)
+	}
+}
+
+func TestRedisSlidingWindowResetDiffersFromRetryAfter(t *testing.T) {
+	// The M2 advisor round caught Reset and RetryAfter being conflated;
+	// prove the redis backend keeps them apart, on redis's own clock.
+	// Seeded log (window 1h, rate 2): entries 30m and 10m old. The next
+	// slot frees when the OLDEST expires (~30m from now); the log is
+	// only fully clear when the NEWEST does (~50m from now).
+	l := newIntegrationLimiter(t)
+	key := integrationKey(t, l, config.AlgoSlidingWindow)
+	window := time.Hour
+	limit := config.Limit{Algorithm: config.AlgoSlidingWindow, Rate: 2, Window: config.Duration(window)}
+	ctx := context.Background()
+
+	rt, err := l.client.Time(ctx).Result()
+	if err != nil {
+		t.Fatalf("TIME: %v", err)
+	}
+	stateKey := "turnike:" + config.AlgoSlidingWindow + ":" + key
+	seed := []redis.Z{
+		{Score: float64(rt.Add(-30 * time.Minute).UnixMicro()), Member: "seed-oldest"},
+		{Score: float64(rt.Add(-10 * time.Minute).UnixMicro()), Member: "seed-newest"},
+	}
+	if err := l.client.ZAdd(ctx, stateKey, seed...).Err(); err != nil {
+		t.Fatalf("seed ZADD: %v", err)
+	}
+
+	dec, err := l.Allow(ctx, key, limit)
+	if err != nil {
+		t.Fatalf("Allow: %v", err)
+	}
+	if dec.Allowed {
+		t.Fatal("allowed with a full seeded log, want denied")
+	}
+	if dec.RetryAfter <= 29*time.Minute || dec.RetryAfter >= 31*time.Minute {
+		t.Errorf("RetryAfter = %v, want ~30m (the oldest entry's expiry)", dec.RetryAfter)
+	}
+	// Compare the two on the same clock: Reset sits ~20m past the
+	// instant RetryAfter points at.
+	gap := dec.Reset.Sub(rt) - dec.RetryAfter
+	if gap <= 19*time.Minute || gap >= 21*time.Minute {
+		t.Errorf("Reset - (now + RetryAfter) = %v, want ~20m (newest vs oldest expiry)", gap)
+	}
+}
+
+func TestRedisSlidingWindowSlotFrees(t *testing.T) {
+	l := newIntegrationLimiter(t)
+	key := integrationKey(t, l, config.AlgoSlidingWindow)
+	limit := config.Limit{Algorithm: config.AlgoSlidingWindow, Rate: 1, Window: config.Duration(time.Second)}
+	ctx := context.Background()
+
+	first, err := l.Allow(ctx, key, limit)
+	if err != nil || !first.Allowed {
+		t.Fatalf("first: dec=%+v err=%v, want allowed", first, err)
+	}
+	second, err := l.Allow(ctx, key, limit)
+	if err != nil || second.Allowed {
+		t.Fatalf("second: dec=%+v err=%v, want denied inside the window", second, err)
+	}
+	// 1.1s later the only counted entry has aged out (exact-boundary
+	// eviction plus real elapsed time on the redis clock).
+	time.Sleep(1100 * time.Millisecond)
+	third, err := l.Allow(ctx, key, limit)
+	if err != nil || !third.Allowed {
+		t.Fatalf("after eviction: dec=%+v err=%v, want allowed", third, err)
+	}
+}
+
+func TestRedisSlidingWindowHammer(t *testing.T) {
+	l := newIntegrationLimiter(t)
+	const rate = 50
+	const instances = 4
+	const perInstance = 100
+	// 1m window: no grid to straddle (the log slides), and no hammer
+	// lasts long enough for entries to age out mid-run.
+	limit := config.Limit{Algorithm: config.AlgoSlidingWindow, Rate: rate, Window: config.Duration(time.Minute)}
+	key := integrationKey(t, l, config.AlgoSlidingWindow)
+
+	limiters := []*RedisLimiter{l}
+	for i := 1; i < instances; i++ {
+		li := NewRedisLimiter(config.Redis{Addr: os.Getenv("REDIS_ADDR")}, slog.New(slog.DiscardHandler))
+		t.Cleanup(func() { _ = li.Close() })
+		limiters = append(limiters, li)
+	}
+
+	ctx := context.Background()
+	var wg sync.WaitGroup
+	var allowed atomic.Int64
+	for _, li := range limiters {
+		for i := 0; i < perInstance; i++ {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				dec, err := li.Allow(ctx, key, limit)
+				if err != nil {
+					t.Error(err)
+					return
+				}
+				if dec.Allowed {
+					allowed.Add(1)
+				}
+			}()
+		}
+	}
+	wg.Wait()
+
+	if got := allowed.Load(); got != rate {
+		t.Errorf("allowed = %d over %d attempts from %d instances, want exactly %d",
+			got, instances*perInstance, instances, rate)
+	}
+	// The zset must hold exactly rate entries: fewer would mean two
+	// same-µs accepts collapsed into one member - the over-admission
+	// path the per-call nonce exists to close. 400 racing goroutines
+	// reliably produce same-µs accept pairs.
+	card, err := l.client.ZCard(context.Background(), "turnike:"+config.AlgoSlidingWindow+":"+key).Result()
+	if err != nil {
+		t.Fatalf("ZCARD: %v", err)
+	}
+	if card != rate {
+		t.Errorf("log length = %d, want exactly %d (a shorter log means member collision)", card, rate)
 	}
 }

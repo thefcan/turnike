@@ -5,6 +5,7 @@ import (
 	_ "embed"
 	"fmt"
 	"log/slog"
+	"math/rand/v2"
 	"time"
 
 	"github.com/redis/go-redis/v9"
@@ -27,6 +28,9 @@ var fixedWindowLua string
 //go:embed scripts/token_bucket.lua
 var tokenBucketLua string
 
+//go:embed scripts/sliding_window.lua
+var slidingWindowLua string
+
 // scriptEntry binds one algorithm's Lua script to the glue that feeds
 // it and reads it back.
 type scriptEntry struct {
@@ -41,7 +45,6 @@ type scriptEntry struct {
 }
 
 // scripts maps each algorithm to its atomic check-and-consume script.
-// sliding_window lands in the next commit.
 var scripts = map[string]scriptEntry{
 	config.AlgoFixedWindow: {
 		script:  redis.NewScript(fixedWindowLua),
@@ -55,6 +58,16 @@ var scripts = map[string]scriptEntry{
 		limitOf: func(l config.Limit) int { return l.Burst },
 		args: func(l config.Limit, windowMicros int64) []any {
 			return []any{l.Burst, l.Rate, windowMicros}
+		},
+	},
+	config.AlgoSlidingWindow: {
+		script:  redis.NewScript(slidingWindowLua),
+		limitOf: func(l config.Limit) int { return l.Rate },
+		args: func(l config.Limit, windowMicros int64) []any {
+			// The nonce uniquifies zset members against same-µs accepts
+			// (see the script header). Uniqueness, not secrecy, so
+			// rand/v2 is the right tool.
+			return []any{l.Rate, windowMicros, fmt.Sprintf("%016x", rand.Uint64())} // #nosec G404 -- member uniqueness, nothing security-sensitive
 		},
 	},
 }
