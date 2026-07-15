@@ -35,7 +35,15 @@ const readyCheckTimeout = time.Second
 // 301-redirects uncleaned paths, which would break POSTs through the
 // gateway; path cleaning belongs to the route table alone.
 func NewHandler(cfg *config.Config, logger *slog.Logger, lim limiter.Limiter, ready ...ReadyCheck) (http.Handler, error) {
-	gw, err := NewGateway(cfg.Routes, cfg.Upstream, lim, cfg.Limiter.Redis.OnError, logger)
+	// The on_error policy governs *redis* failures only. Under the
+	// memory backend the sole runtime error is the at-capacity guard,
+	// which fails open by design - a leftover redis.on_error line in a
+	// memory config must not turn that into a 503.
+	onError := config.OnErrorFailOpen
+	if cfg.Limiter.Backend == config.BackendRedis {
+		onError = cfg.Limiter.Redis.OnError
+	}
+	gw, err := NewGateway(cfg.Routes, cfg.Upstream, lim, onError, logger)
 	if err != nil {
 		return nil, err
 	}

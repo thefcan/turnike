@@ -76,8 +76,9 @@ non-atomic implementation has this window, and adding instances widens
 it. turnike runs the whole check-and-consume as **one Lua script per
 decision**: redis executes scripts serially, so the read, the verdict
 and the write are one atomic step — and one round trip. A hammer test
-drives 4 clients × 100 goroutines at one key and asserts *exactly*
-`rate` admissions, per algorithm.
+per algorithm drives 4 clients × 100 goroutines at one key and asserts
+*exactly* its quota admitted — `rate` for the window algorithms, `burst`
+for token_bucket.
 
 ### One clock: redis TIME
 
@@ -122,9 +123,9 @@ one zset entry.
 
 Every redis call runs through a small circuit breaker — 5 consecutive
 failures open it, one probe per 1s cooldown decides recovery — so an
-outage costs roughly one timed-out call per second per instance, not
-one per request. The `on_error` policy says what an unanswerable
-decision means:
+outage costs each instance roughly one probing call per cooldown (plus
+that probe's timeout), not one failed call per request. The `on_error`
+policy says what an unanswerable decision means:
 
 | `on_error` | requests | rate-limit headers | `/readyz` | over-admission while down |
 |---|---|---|---|---|

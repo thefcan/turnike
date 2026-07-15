@@ -75,6 +75,32 @@ func TestHandlerReadyCheckFailure(t *testing.T) {
 	}
 }
 
+func TestHandlerMemoryBackendIgnoresOnError(t *testing.T) {
+	// A leftover redis.on_error: fail_closed in a memory-backend config
+	// must not turn the memory limiter's at-capacity error into a 503 -
+	// that error fails open by design, and there is no breaker whose
+	// cooldown the 503's Retry-After would describe.
+	up := echoUpstream(t, "api")
+	cfg := &config.Config{
+		Limiter: config.Limiter{
+			Backend: config.BackendMemory,
+			Redis:   config.Redis{OnError: config.OnErrorFailClosed},
+		},
+		Routes: []config.Route{{Prefix: "/", Upstream: up.URL}},
+	}
+	h, err := NewHandler(cfg, slog.New(slog.DiscardHandler), erroringLimiter{})
+	if err != nil {
+		t.Fatalf("NewHandler: %v", err)
+	}
+
+	r := httptest.NewRequest("GET", "/api/x", nil)
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, r)
+	if w.Code != http.StatusOK {
+		t.Errorf("status = %d, want 200 (memory backend always fails open)", w.Code)
+	}
+}
+
 func TestHandlerHealthMethodGuard(t *testing.T) {
 	up := echoUpstream(t, "api")
 	h := newTestHandler(t, slog.New(slog.DiscardHandler), up.URL)

@@ -196,7 +196,7 @@ func TestRedisLimiterSubMicrosecondWindow(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "1µs resolution") {
 		t.Fatalf("err = %v, want the resolution guard", err)
 	}
-	if f.evalShaCalls != 0 && f.evalCalls != 0 {
+	if f.evalShaCalls != 0 || f.evalCalls != 0 {
 		t.Error("script was called despite the resolution guard")
 	}
 }

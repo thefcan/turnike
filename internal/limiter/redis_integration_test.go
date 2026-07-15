@@ -8,8 +8,9 @@ package limiter
 // redis-free), set-but-unreachable FAILS so CI can never silently skip.
 // Windows are restricted to values that divide the Go-zero-time to
 // Unix-epoch offset (1s / 1m / 1h) so the epoch-anchored redis grid and
-// the Truncate-anchored memory grid coincide, and long enough that a
-// grid boundary cannot land mid-test.
+// the Truncate-anchored memory grid coincide. Tests that must not
+// straddle a grid boundary either retry on a fresh key (rollover) or
+// wait out a start right at the boundary (the fixed_window hammer).
 
 import (
 	"context"
@@ -373,10 +374,20 @@ func TestRedisFixedWindowHammer(t *testing.T) {
 	const perInstance = 100
 	// 1h window: with a short one, a grid boundary landing mid-hammer
 	// makes up to 2×rate admissions *correct* fixed_window behavior - a
-	// permanent flake. The hour grid puts that off the table; the
+	// permanent flake. The hour grid makes that rare, and the check
+	// below (on redis's clock, the only one that counts) waits out the
+	// residual case of starting within seconds of the boundary; the
 	// documented boundary edge has the rollover test to itself.
 	limit := config.Limit{Algorithm: config.AlgoFixedWindow, Rate: rate, Window: config.Duration(time.Hour)}
 	key := integrationKey(t, l, config.AlgoFixedWindow)
+
+	rt, err := l.client.Time(context.Background()).Result()
+	if err != nil {
+		t.Fatalf("TIME: %v", err)
+	}
+	if wait := rt.Truncate(time.Hour).Add(time.Hour).Sub(rt); wait < 5*time.Second {
+		time.Sleep(wait + 100*time.Millisecond)
+	}
 
 	// Separate clients, not just goroutines: this is the multi-instance
 	// claim - N gateways sharing one redis admit exactly rate, total.
