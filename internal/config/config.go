@@ -67,7 +67,16 @@ type Redis struct {
 }
 
 // Route maps a path prefix to an upstream and its rate-limit policy.
-// When multiple prefixes match a request path, the longest one wins.
+//
+// Matching is segment-boundary longest-prefix: a request path matches a
+// prefix when it equals the prefix or continues it after a "/" — so
+// "/api" matches "/api" and "/api/users" but not "/apiv2", and "/api/v1"
+// does not match "/api/v1beta/x". Trailing slashes are insignificant
+// ("/api" == "/api/"), and when several prefixes match, the longest wins.
+// A prefix of "/" matches every path. Matching runs on the cleaned,
+// escaped request path; the URL is forwarded to the upstream unchanged
+// (no prefix stripping). If the upstream URL itself has a path, the
+// request path is appended to it.
 type Route struct {
 	Prefix       string           `yaml:"prefix"`
 	Upstream     string           `yaml:"upstream"`

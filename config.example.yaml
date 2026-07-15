@@ -19,7 +19,10 @@ limiter:
   # redis:
   #   addr: localhost:6379
 
-# Routing: when multiple prefixes match a request path, the longest one wins.
+# Routing: segment-boundary longest-prefix. A prefix matches whole path
+# segments only ("/api" matches "/api" and "/api/users", not "/apiv2";
+# "/api/v1" does not match "/api/v1beta/x"); trailing slashes are
+# insignificant, and when multiple prefixes match, the longest one wins.
 routes:
   - prefix: /api/
     upstream: http://localhost:9000
