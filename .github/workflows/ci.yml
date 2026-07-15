@@ -22,6 +22,18 @@ jobs:
 
   test:
     runs-on: ubuntu-latest
+    # Real redis for the integration tests; with REDIS_ADDR set they run
+    # instead of skipping, so CI always exercises the redis backend.
+    services:
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 5
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-go@v6
@@ -30,3 +42,5 @@ jobs:
       - name: go.mod is tidy
         run: go mod tidy && git diff --exit-code go.mod go.sum
       - run: go test -race ./...
+        env:
+          REDIS_ADDR: localhost:6379
