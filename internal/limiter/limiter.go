@@ -3,6 +3,7 @@ package limiter
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"time"
 
 	"github.com/thefcan/turnike/internal/config"
@@ -50,13 +51,15 @@ type RealClock struct{}
 func (RealClock) Now() time.Time { return time.Now() }
 
 // New builds the Limiter selected by cfg.Backend. cfg is assumed to be
-// config-validated (Backend is "memory" or "redis").
-func New(cfg config.Limiter, clock Clock) (Limiter, error) {
+// config-validated (Backend is "memory" or "redis"). clock drives the
+// in-memory algorithms - the redis backend sources time from redis TIME
+// instead - and logger carries backend diagnostics.
+func New(cfg config.Limiter, clock Clock, logger *slog.Logger) (Limiter, error) {
 	switch cfg.Backend {
 	case config.BackendMemory:
 		return NewMemoryLimiter(clock), nil
 	case config.BackendRedis:
-		return nil, fmt.Errorf("limiter: redis backend lands in M3")
+		return NewRedisLimiter(cfg.Redis, logger), nil
 	default:
 		// Unreachable after config validation, but don't silently no-op.
 		return nil, fmt.Errorf("limiter: unknown backend %q", cfg.Backend)

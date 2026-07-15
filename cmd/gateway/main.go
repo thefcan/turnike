@@ -64,7 +64,7 @@ func serve(ctx context.Context, cfg *config.Config, ln net.Listener, logger *slo
 	// ErrClosed. This covers the error returns before Serve starts.
 	defer func() { _ = ln.Close() }()
 
-	lim, err := limiter.New(cfg.Limiter, limiter.RealClock{})
+	lim, err := limiter.New(cfg.Limiter, limiter.RealClock{}, logger)
 	if err != nil {
 		return err
 	}

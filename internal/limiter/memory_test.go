@@ -2,6 +2,7 @@ package limiter
 
 import (
 	"context"
+	"log/slog"
 	"sync"
 	"testing"
 	"time"
@@ -125,8 +126,10 @@ func TestMemoryLimiterCapsDistinctKeys(t *testing.T) {
 }
 
 func TestNew(t *testing.T) {
+	logger := slog.New(slog.DiscardHandler)
+
 	t.Run("memory backend", func(t *testing.T) {
-		lim, err := New(config.Limiter{Backend: config.BackendMemory}, RealClock{})
+		lim, err := New(config.Limiter{Backend: config.BackendMemory}, RealClock{}, logger)
 		if err != nil {
 			t.Fatalf("New: %v", err)
 		}
@@ -135,15 +138,28 @@ func TestNew(t *testing.T) {
 		}
 	})
 
-	t.Run("redis backend not yet implemented", func(t *testing.T) {
-		_, err := New(config.Limiter{Backend: config.BackendRedis}, RealClock{})
-		if err == nil {
-			t.Fatal("New(redis): want error before M3, got nil")
+	t.Run("redis backend", func(t *testing.T) {
+		// A dead loopback addr: construction must still succeed (the
+		// eager script load is best-effort), it must just come up
+		// under the failure policy instead of crash-looping.
+		lim, err := New(config.Limiter{
+			Backend: config.BackendRedis,
+			Redis:   config.Redis{Addr: "127.0.0.1:1", OnError: config.OnErrorDegrade},
+		}, RealClock{}, logger)
+		if err != nil {
+			t.Fatalf("New(redis) with unreachable addr: %v, want success", err)
+		}
+		rl, ok := lim.(*RedisLimiter)
+		if !ok {
+			t.Fatalf("New returned %T, want *RedisLimiter", lim)
+		}
+		if err := rl.Close(); err != nil {
+			t.Errorf("Close: %v", err)
 		}
 	})
 
 	t.Run("unknown backend", func(t *testing.T) {
-		_, err := New(config.Limiter{Backend: "memcached"}, RealClock{})
+		_, err := New(config.Limiter{Backend: "memcached"}, RealClock{}, logger)
 		if err == nil {
 			t.Fatal("New(memcached): want error, got nil")
 		}
