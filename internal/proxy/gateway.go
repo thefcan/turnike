@@ -147,6 +147,12 @@ func hasDotSegments(path string) bool {
 	return false
 }
 
+// statusClientClosedRequest mirrors nginx's non-standard 499: the client
+// disconnected before the gateway produced a response, so no real HTTP
+// status was ever put on the wire — but the access log should say that,
+// not fall back to the statusRecorder's default 200.
+const statusClientClosedRequest = 499
+
 func (g *Gateway) errorHandler(upstream string) func(http.ResponseWriter, *http.Request, error) {
 	return func(w http.ResponseWriter, r *http.Request, err error) {
 		g.logger.ErrorContext(r.Context(), "upstream error",
@@ -156,8 +162,13 @@ func (g *Gateway) errorHandler(upstream string) func(http.ResponseWriter, *http.
 			"request_id", RequestIDFrom(r.Context()),
 		)
 		// The client may be the one that gave up; don't write a 502 into
-		// a connection that is already gone.
+		// a connection that is already gone. Still correct the access
+		// log's idea of what happened: only the recorder's bookkeeping
+		// changes here, nothing is written to the (dead) connection.
 		if errors.Is(r.Context().Err(), context.Canceled) {
+			if rec, ok := w.(*statusRecorder); ok {
+				rec.status = statusClientClosedRequest
+			}
 			return
 		}
 		http.Error(w, "bad gateway", http.StatusBadGateway)

@@ -171,6 +171,60 @@ func TestGatewayRejectsDotSegments(t *testing.T) {
 	}
 }
 
+func TestGatewayResponseHeaderTimeoutIs502(t *testing.T) {
+	// Distinct from TestGatewayDeadUpstream (a dial failure): here the
+	// connection succeeds but the upstream sits on the response past the
+	// configured header timeout, exercising the same errorHandler through
+	// a different Transport failure.
+	slow := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		time.Sleep(100 * time.Millisecond)
+		w.WriteHeader(http.StatusOK)
+	}))
+	t.Cleanup(slow.Close)
+
+	g, err := NewGateway(
+		[]config.Route{{Prefix: "/api/", Upstream: slow.URL}},
+		config.Upstream{ResponseHeaderTimeout: config.Duration(10 * time.Millisecond)},
+		allowAllLimiter{}, slog.New(slog.DiscardHandler))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	r := httptest.NewRequest("GET", "/api/x", nil)
+	w := httptest.NewRecorder()
+	g.ServeHTTP(w, r)
+
+	if w.Code != http.StatusBadGateway {
+		t.Errorf("response-header-timeout upstream = %d, want 502", w.Code)
+	}
+	body, _ := io.ReadAll(w.Result().Body)
+	if !strings.Contains(string(body), "bad gateway") {
+		t.Errorf("body = %q, want bad gateway message", body)
+	}
+}
+
+func TestErrorHandlerRecordsClientCancelAs499(t *testing.T) {
+	g := &Gateway{logger: slog.New(slog.DiscardHandler)}
+	eh := g.errorHandler("http://example.invalid")
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	r := httptest.NewRequest("GET", "/api/x", nil).WithContext(ctx)
+	inner := httptest.NewRecorder()
+	rec := &statusRecorder{ResponseWriter: inner, status: http.StatusOK}
+
+	eh(rec, r, context.Canceled)
+
+	if rec.status != statusClientClosedRequest {
+		t.Errorf("recorder status = %d, want %d (client-closed)", rec.status, statusClientClosedRequest)
+	}
+	// Nothing should have been written to the underlying (dead)
+	// connection — only the recorder's bookkeeping changes.
+	if inner.Code != http.StatusOK {
+		t.Errorf("wrote status %d to the dead connection, want no write at all", inner.Code)
+	}
+}
+
 func TestGatewayDeadUpstream(t *testing.T) {
 	l, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
