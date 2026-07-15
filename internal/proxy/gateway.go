@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/http/httputil"
 	"net/url"
+	"strings"
 	"time"
 
 	"github.com/thefcan/turnike/internal/config"
@@ -58,6 +59,15 @@ func NewGateway(routes []config.Route, up config.Upstream, logger *slog.Logger) 
 }
 
 func (g *Gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	// Dot segments are rejected outright: matching runs on the cleaned
+	// path but the URL is forwarded unchanged, so letting ".." through —
+	// plain or percent-encoded, which only surfaces after decoding —
+	// would let the matched route and the path the upstream resolves
+	// diverge.
+	if hasDotSegments(r.URL.Path) {
+		http.Error(w, "no route", http.StatusNotFound)
+		return
+	}
 	entry, ok := g.table.Match(r.URL.EscapedPath())
 	if !ok {
 		http.Error(w, "no route", http.StatusNotFound)
@@ -65,6 +75,17 @@ func (g *Gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	setRoutePrefix(r.Context(), entry.Route.Prefix)
 	g.proxies[entry.Prefix].ServeHTTP(w, r)
+}
+
+// hasDotSegments reports whether the decoded path contains a "." or ".."
+// segment.
+func hasDotSegments(path string) bool {
+	for seg := range strings.SplitSeq(path, "/") {
+		if seg == "." || seg == ".." {
+			return true
+		}
+	}
+	return false
 }
 
 func (g *Gateway) errorHandler(upstream string) func(http.ResponseWriter, *http.Request, error) {

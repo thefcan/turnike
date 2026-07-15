@@ -1,9 +1,19 @@
 package proxy
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"net/http/httptest"
+	"strings"
 	"testing"
 )
+
+// keyFingerprint mirrors Identity.String's hashing so tests can pin the
+// exact log form of an API key.
+func keyFingerprint(key string) string {
+	sum := sha256.Sum256([]byte(key))
+	return "key:" + hex.EncodeToString(sum[:8])
+}
 
 func TestIdentityFor(t *testing.T) {
 	tests := []struct {
@@ -18,7 +28,7 @@ func TestIdentityFor(t *testing.T) {
 			apiKey:     "demo-premium-key",
 			remoteAddr: "1.2.3.4:5678",
 			want:       Identity{Kind: KindKey, Value: "demo-premium-key"},
-			wantString: "key:demo-premium-key",
+			wantString: keyFingerprint("demo-premium-key"),
 		},
 		{
 			name:       "ip fallback strips port",
@@ -54,6 +64,13 @@ func TestIdentityFor(t *testing.T) {
 				t.Errorf("String() = %q, want %q", got.String(), tt.wantString)
 			}
 		})
+	}
+}
+
+func TestIdentityStringNeverLeaksRawKey(t *testing.T) {
+	id := Identity{Kind: KindKey, Value: "super-secret-api-key"}
+	if s := id.String(); strings.Contains(s, "super-secret") {
+		t.Errorf("String() = %q leaks the raw API key", s)
 	}
 }
 

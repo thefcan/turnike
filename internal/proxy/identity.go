@@ -1,6 +1,8 @@
 package proxy
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"net"
 	"net/http"
 )
@@ -37,8 +39,14 @@ func IdentityFor(r *http.Request) Identity {
 	return Identity{Kind: KindIP, Value: host}
 }
 
-// String renders the identity as "key:<apikey>" or "ip:<addr>" — the
-// collision-proof form used in logs and (from M3 on) Redis keys.
+// String renders the identity for logs and (from M3 on) Redis keys:
+// "ip:<addr>", or "key:<fingerprint>" with the first 8 bytes of the
+// key's SHA-256 — the raw API key never leaves Value, which exists only
+// for KeyOverrides lookups.
 func (id Identity) String() string {
+	if id.Kind == KindKey {
+		sum := sha256.Sum256([]byte(id.Value))
+		return id.Kind + ":" + hex.EncodeToString(sum[:8])
+	}
 	return id.Kind + ":" + id.Value
 }

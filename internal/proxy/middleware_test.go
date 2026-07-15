@@ -22,6 +22,7 @@ func TestMiddlewareRequestID(t *testing.T) {
 		{"generates an id when absent", "", true},
 		{"honors a reasonable inbound id", "client-supplied-id", false},
 		{"replaces an oversized inbound id", strings.Repeat("x", 129), true},
+		{"replaces an inbound id with invalid characters", "bad id\twith spaces", true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -94,8 +95,11 @@ func TestMiddlewareAccessLog(t *testing.T) {
 	if line.Route != "/api/" {
 		t.Errorf("route = %q, want /api/", line.Route)
 	}
-	if line.Identity != "key:demo" {
-		t.Errorf("identity = %q, want key:demo", line.Identity)
+	if want := keyFingerprint("demo"); line.Identity != want {
+		t.Errorf("identity = %q, want fingerprint %q", line.Identity, want)
+	}
+	if strings.Contains(buf.String(), `"demo"`) {
+		t.Error("access log leaks the raw API key")
 	}
 	if line.RequestID == "" {
 		t.Error("request_id missing from access log")
@@ -105,13 +109,53 @@ func TestMiddlewareAccessLog(t *testing.T) {
 	}
 }
 
-func TestStatusRecorderDefaultsAndUnwrap(t *testing.T) {
-	rec := &statusRecorder{ResponseWriter: httptest.NewRecorder(), status: http.StatusOK}
-	if rec.status != http.StatusOK {
-		t.Errorf("default status = %d, want 200", rec.status)
+func TestMiddlewareImplicitStatusAndUnwrap(t *testing.T) {
+	var buf bytes.Buffer
+	h := Middleware(slog.New(slog.NewJSONHandler(&buf, nil)))(
+		http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			// No WriteHeader: the recorder must log the implicit 200, and
+			// Flush must reach the real writer through Unwrap.
+			_, _ = w.Write([]byte("implicit"))
+			if err := http.NewResponseController(w).Flush(); err != nil {
+				t.Errorf("Flush through Unwrap failed: %v", err)
+			}
+		}))
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, httptest.NewRequest("GET", "/x", nil))
+
+	var line struct {
+		Status int `json:"status"`
 	}
-	rc := http.NewResponseController(rec)
-	if err := rc.Flush(); err != nil {
-		t.Errorf("Flush through Unwrap failed: %v", err)
+	if err := json.Unmarshal(buf.Bytes(), &line); err != nil {
+		t.Fatalf("access log: %v", err)
+	}
+	if line.Status != http.StatusOK {
+		t.Errorf("logged status = %d, want implicit 200", line.Status)
+	}
+	if !w.Flushed {
+		t.Error("Flush did not reach the underlying writer")
+	}
+}
+
+func TestMiddlewareLogsAbortedRequests(t *testing.T) {
+	var buf bytes.Buffer
+	h := Middleware(slog.New(slog.NewJSONHandler(&buf, nil)))(
+		http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+			// ReverseProxy aborts like this when the upstream body copy
+			// fails mid-response.
+			panic(http.ErrAbortHandler)
+		}))
+
+	func() {
+		defer func() {
+			if recover() == nil {
+				t.Error("middleware swallowed the abort panic")
+			}
+		}()
+		h.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest("GET", "/x", nil))
+	}()
+
+	if !strings.Contains(buf.String(), `"msg":"request"`) {
+		t.Errorf("aborted request left no access-log line: %s", buf.String())
 	}
 }

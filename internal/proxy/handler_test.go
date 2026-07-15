@@ -118,8 +118,8 @@ func TestHandlerFullChain(t *testing.T) {
 	if line.Route != "/" {
 		t.Errorf("route = %q, want /", line.Route)
 	}
-	if line.Identity != "key:demo" {
-		t.Errorf("identity = %q, want key:demo", line.Identity)
+	if want := keyFingerprint("demo"); line.Identity != want {
+		t.Errorf("identity = %q, want fingerprint %q", line.Identity, want)
 	}
 	if line.RequestID != respID {
 		t.Errorf("logged request_id = %q, response id = %q; want equal", line.RequestID, respID)

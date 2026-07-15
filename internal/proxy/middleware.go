@@ -6,16 +6,16 @@ import (
 	"encoding/hex"
 	"log/slog"
 	"net/http"
+	"regexp"
 	"time"
 )
 
-// HeaderRequestID is the header carrying the request ID; a non-empty
-// inbound value of at most maxRequestIDLen is honored, otherwise a fresh
-// ID is generated.
-const (
-	HeaderRequestID = "X-Request-Id"
-	maxRequestIDLen = 128
-)
+// HeaderRequestID is the header carrying the request ID; an inbound value
+// matching requestIDPattern is honored, anything else is replaced with a
+// fresh ID.
+const HeaderRequestID = "X-Request-Id"
+
+var requestIDPattern = regexp.MustCompile(`^[A-Za-z0-9._-]{1,128}$`)
 
 type ctxKey int
 
@@ -33,7 +33,7 @@ func Middleware(logger *slog.Logger) func(http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			start := time.Now()
 			id := r.Header.Get(HeaderRequestID)
-			if id == "" || len(id) > maxRequestIDLen {
+			if !requestIDPattern.MatchString(id) {
 				id = newRequestID()
 			}
 			r.Header.Set(HeaderRequestID, id)
@@ -47,18 +47,21 @@ func Middleware(logger *slog.Logger) func(http.Handler) http.Handler {
 			r = r.WithContext(ctx)
 
 			rec := &statusRecorder{ResponseWriter: w, status: http.StatusOK}
+			// Deferred so the line survives ReverseProxy's ErrAbortHandler
+			// panic on a failed body copy (the panic still propagates).
+			defer func() {
+				logger.LogAttrs(ctx, slog.LevelInfo, "request",
+					slog.String("method", r.Method),
+					slog.String("path", r.URL.Path),
+					slog.Int("status", rec.status),
+					slog.Duration("duration", time.Since(start)),
+					slog.String("route", *routePrefix),
+					slog.String("identity", IdentityFor(r).String()),
+					slog.String("request_id", id),
+					slog.Int64("bytes", rec.bytes),
+				)
+			}()
 			next.ServeHTTP(rec, r)
-
-			logger.LogAttrs(ctx, slog.LevelInfo, "request",
-				slog.String("method", r.Method),
-				slog.String("path", r.URL.Path),
-				slog.Int("status", rec.status),
-				slog.Duration("duration", time.Since(start)),
-				slog.String("route", *routePrefix),
-				slog.String("identity", IdentityFor(r).String()),
-				slog.String("request_id", id),
-				slog.Int64("bytes", rec.bytes),
-			)
 		})
 	}
 }

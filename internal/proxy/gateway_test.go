@@ -137,6 +137,26 @@ func TestGatewayUnknownRoute(t *testing.T) {
 	}
 }
 
+func TestGatewayRejectsDotSegments(t *testing.T) {
+	admin := echoUpstream(t, "admin")
+	api := echoUpstream(t, "api")
+	g := newTestGateway(t, []config.Route{
+		{Prefix: "/api/", Upstream: api.URL},
+		{Prefix: "/admin/", Upstream: admin.URL},
+	})
+
+	// Plain and percent-encoded dot segments must both 404: the matched
+	// route and the path the upstream would resolve could diverge.
+	for _, path := range []string{"/api/../admin/x", "/api/%2e%2e/admin/x", "/api/./x"} {
+		r := httptest.NewRequest("GET", path, nil)
+		w := httptest.NewRecorder()
+		g.ServeHTTP(w, r)
+		if w.Code != http.StatusNotFound {
+			t.Errorf("GET %s = %d, want 404", path, w.Code)
+		}
+	}
+}
+
 func TestGatewayDeadUpstream(t *testing.T) {
 	l, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
