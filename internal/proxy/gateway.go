@@ -166,6 +166,10 @@ func (g *Gateway) errorHandler(upstream string) func(http.ResponseWriter, *http.
 		// log's idea of what happened: only the recorder's bookkeeping
 		// changes here, nothing is written to the (dead) connection.
 		if errors.Is(r.Context().Err(), context.Canceled) {
+			// The type assertion only succeeds when Gateway is reached
+			// through Middleware (handler.go always does this in
+			// production); a bare *Gateway in a test just skips the
+			// bookkeeping; there's no log line to correct.
 			if rec, ok := w.(*statusRecorder); ok {
 				rec.status = statusClientClosedRequest
 			}

@@ -16,16 +16,24 @@ type bucket interface {
 	step(limit config.Limit, now time.Time) Decision
 }
 
+// maxKeys bounds MemoryLimiter.state. Identity isn't authenticated —
+// X-API-Key is free-form client input (identity.go) — so without a cap,
+// anyone can grow the map without limit just by varying the header per
+// request, no elevated privilege required. A var, not a const, so tests
+// can shrink it instead of looping to a six-figure count.
+var maxKeys = 100_000
+
 // MemoryLimiter is the in-memory Limiter backend: one bucket per
 // (algorithm, key), guarded by a single mutex. A single lock is
 // deliberate — turnike's route counts don't warrant sharding, and a lock
 // per key would need its own eviction story for no measured benefit.
 //
-// The state map grows by one entry per distinct key seen and is never
-// evicted; a long-lived process accumulating unbounded distinct API keys
-// or client IPs will grow memory without bound. Documented as a known M2
-// limitation — M3's Redis backend replaces this map with TTL'd keys,
-// which removes the problem rather than papering over it here.
+// The state map is capped at maxKeys entries rather than reaped on a
+// timer: a bounded map needs no background goroutine or shutdown
+// lifecycle, and a request for a brand-new key beyond the cap simply
+// fails open (see Gateway) instead of being tracked. M3's Redis backend
+// replaces this whole map with TTL'd keys, which removes the need for
+// either a cap or a reaper.
 type MemoryLimiter struct {
 	clock Clock
 	mu    sync.Mutex
@@ -51,6 +59,9 @@ func (m *MemoryLimiter) Allow(_ context.Context, key string, limit config.Limit)
 
 	b, ok := m.state[stateKey]
 	if !ok {
+		if len(m.state) >= maxKeys {
+			return Decision{}, fmt.Errorf("limiter: at capacity (%d distinct keys)", maxKeys)
+		}
 		nb, err := newBucket(limit.Algorithm)
 		if err != nil {
 			return Decision{}, err

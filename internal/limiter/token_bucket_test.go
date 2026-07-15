@@ -100,3 +100,26 @@ func TestTokenBucketClockGoingBackwardGrantsNoFreeRefill(t *testing.T) {
 		t.Error("a request timestamped before the last one must not be granted a free refill")
 	}
 }
+
+func TestTokenBucketToleratesFloatingPointNoise(t *testing.T) {
+	// rate=1/window=3s doesn't divide evenly in binary floating point
+	// (refillPerSec = 1/3 = 0.3333...); accumulating ten 300ms refills
+	// should reach exactly 1.0 token in exact arithmetic, but float64
+	// summation error alone can land it one ULP under. A strict >=1
+	// comparison would wrongly deny the request that lands on that
+	// boundary; tokenEpsilon must absorb it.
+	limit := config.Limit{Algorithm: config.AlgoTokenBucket, Rate: 1, Burst: 1, Window: config.Duration(3 * time.Second)}
+	t0 := time.Unix(1_000_000_000, 0)
+	b := &tokenBucket{}
+	b.step(limit, t0) // starts full, consumes the only token -> 0
+
+	now := t0
+	for i := 0; i < 9; i++ {
+		now = now.Add(300 * time.Millisecond)
+		b.step(limit, now) // each still short of a full token; state keeps advancing
+	}
+	now = now.Add(300 * time.Millisecond) // 10th step: 3s elapsed in total, one full window
+	if dec := b.step(limit, now); !dec.Allowed {
+		t.Errorf("request after accumulating a full token across 10 sub-steps: Allowed = false, want true (tokens=%v short of 1.0)", 1-b.tokens)
+	}
+}

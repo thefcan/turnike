@@ -17,6 +17,11 @@ type tokenBucket struct {
 	last   time.Time // zero until the first step; see the IsZero check below
 }
 
+// tokenEpsilon absorbs float64 rounding noise around the admit threshold
+// (see the comment at its use in step) without meaningfully changing
+// when a request is admitted.
+const tokenEpsilon = 1e-9
+
 func (b *tokenBucket) step(limit config.Limit, now time.Time) Decision {
 	burst := float64(limit.Burst)
 	refillPerSec := float64(limit.Rate) / time.Duration(limit.Window).Seconds()
@@ -37,9 +42,18 @@ func (b *tokenBucket) step(limit config.Limit, now time.Time) Decision {
 		// elapsed time from the last known-good instant.
 	}
 
-	allowed := b.tokens >= 1
+	// A strict >= 1 comparison is vulnerable to float64 representation
+	// error: repeated small refills (e.g. a rate/window that doesn't
+	// divide evenly, like 1/3) can land a token count that's
+	// mathematically exactly 1.0 one ULP under it, wrongly denying a
+	// request that should be allowed. tokenEpsilon absorbs that noise
+	// without meaningfully early-admitting anything.
+	allowed := b.tokens >= 1-tokenEpsilon
 	if allowed {
 		b.tokens--
+		if b.tokens < 0 {
+			b.tokens = 0
+		}
 	}
 	remaining := int(math.Floor(b.tokens))
 	if remaining < 0 {

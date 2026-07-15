@@ -43,3 +43,10 @@ routes:
       algorithm: sliding_window
       rate: 5
       window: 10s
+
+  - prefix: /auth/
+    upstream: http://localhost:9000
+    limit:
+      algorithm: fixed_window
+      rate: 3
+      window: 10s

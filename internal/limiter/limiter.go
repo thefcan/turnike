@@ -18,11 +18,15 @@ type Decision struct {
 	// Remaining is the quota left in the current window/bucket —
 	// X-RateLimit-Remaining.
 	Remaining int
-	// Reset is when the quota next becomes fully available —
-	// X-RateLimit-Reset.
+	// Reset is when this key is back to a clean slate — nothing counted
+	// against it — X-RateLimit-Reset. For fixed_window that's the end of
+	// the current window; for token_bucket, when the bucket refills to
+	// Burst; for sliding_window, when every currently-counted request
+	// has aged out (the newest one's expiry, not the next one's — the
+	// next slot to free is RetryAfter's question, not this one's).
 	Reset time.Time
-	// RetryAfter is how long to wait before retrying; meaningful only
-	// when Allowed is false — Retry-After.
+	// RetryAfter is how long until the *next* request would succeed;
+	// meaningful only when Allowed is false — Retry-After.
 	RetryAfter time.Duration
 }
 

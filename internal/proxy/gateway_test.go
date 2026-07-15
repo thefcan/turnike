@@ -3,6 +3,7 @@ package proxy
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"log/slog"
 	"net"
@@ -25,6 +26,14 @@ type allowAllLimiter struct{}
 
 func (allowAllLimiter) Allow(context.Context, string, config.Limit) (limiter.Decision, error) {
 	return limiter.Decision{Allowed: true, Limit: 1, Remaining: 1, Reset: time.Now().Add(time.Hour)}, nil
+}
+
+// erroringLimiter is a Limiter test double for the fail-open path: every
+// call errors, as if the backend were unreachable.
+type erroringLimiter struct{}
+
+func (erroringLimiter) Allow(context.Context, string, config.Limit) (limiter.Decision, error) {
+	return limiter.Decision{}, errors.New("limiter backend unreachable")
 }
 
 // echoUpstream mirrors mock/main.go: it reports what it received so
@@ -200,6 +209,31 @@ func TestGatewayResponseHeaderTimeoutIs502(t *testing.T) {
 	body, _ := io.ReadAll(w.Result().Body)
 	if !strings.Contains(string(body), "bad gateway") {
 		t.Errorf("body = %q, want bad gateway message", body)
+	}
+}
+
+func TestGatewayFailsOpenOnLimiterError(t *testing.T) {
+	// An internal limiter error must not take the upstream down with it:
+	// the request still proceeds, just without X-RateLimit-* (there's no
+	// Decision to report). config-validated algorithms never actually
+	// produce this error in M2 — this test exists so the path isn't
+	// silently dead code once M3's Redis backend can fail for real.
+	up := echoUpstream(t, "api")
+	g, err := NewGateway([]config.Route{{Prefix: "/api/", Upstream: up.URL}},
+		config.Upstream{}, erroringLimiter{}, slog.New(slog.DiscardHandler))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	r := httptest.NewRequest("GET", "/api/x", nil)
+	w := httptest.NewRecorder()
+	g.ServeHTTP(w, r)
+
+	if w.Code != http.StatusOK {
+		t.Errorf("status = %d, want 200 (fail open despite the limiter error)", w.Code)
+	}
+	if got := w.Header().Get("X-RateLimit-Limit"); got != "" {
+		t.Errorf("X-RateLimit-Limit = %q, want absent — no Decision was returned to report", got)
 	}
 }
 

@@ -34,21 +34,54 @@ func TestSlidingWindowBucket(t *testing.T) {
 		}
 	}
 
-	// Denied at t0+3s: the oldest counted request (t0) exits the window
-	// at t0+10s, so that's exactly Reset/RetryAfter.
+	// Denied at t0+3s: RetryAfter is when the *oldest* counted request
+	// (t0) exits the window — the next slot to free. Reset is when the
+	// log is entirely clear, i.e. the *newest* entry's (t0+2s) expiry —
+	// a later instant, since the three requests are staggered.
 	deny := b.step(limit, t0.Add(3*time.Second))
-	wantReset := t0.Add(10 * time.Second)
+	wantReset := t0.Add(2 * time.Second).Add(10 * time.Second)
 	if !deny.Reset.Equal(wantReset) {
-		t.Errorf("Reset = %v, want %v", deny.Reset, wantReset)
+		t.Errorf("Reset = %v, want %v (newest entry's expiry)", deny.Reset, wantReset)
 	}
 	if want := 7 * time.Second; deny.RetryAfter != want {
-		t.Errorf("RetryAfter = %v, want %v", deny.RetryAfter, want)
+		t.Errorf("RetryAfter = %v, want %v (oldest entry's expiry - now)", deny.RetryAfter, want)
 	}
 
 	// Just after the oldest entry (t0) ages out, its slot frees up.
 	next := b.step(limit, t0.Add(10*time.Second).Add(time.Millisecond))
 	if !next.Allowed {
 		t.Fatal("request just past the oldest entry's expiry: Allowed = false, want true")
+	}
+}
+
+func TestSlidingWindowResetDiffersFromRetryAfterUnderStaggeredLoad(t *testing.T) {
+	// Reset (Decision's contract: "back to a clean slate") and
+	// RetryAfter ("when does the next request succeed") are different
+	// questions for a sliding log at capacity: one slot frees when the
+	// *oldest* entry ages out, but the log isn't fully clear until the
+	// *newest* one does too.
+	limit := config.Limit{Algorithm: config.AlgoSlidingWindow, Rate: 3, Window: config.Duration(10 * time.Second)}
+	t0 := time.Unix(1_000_000_000, 0)
+	b := &slidingWindowBucket{}
+
+	b.step(limit, t0) // oldest
+	b.step(limit, t0.Add(1*time.Second))
+	b.step(limit, t0.Add(2*time.Second)) // newest
+
+	deny := b.step(limit, t0.Add(3*time.Second))
+	if deny.Allowed {
+		t.Fatal("4th request at capacity: Allowed = true, want false")
+	}
+	if wantRetryAfter := t0.Add(10 * time.Second).Sub(t0.Add(3 * time.Second)); deny.RetryAfter != wantRetryAfter {
+		t.Errorf("RetryAfter = %v, want %v (oldest entry's expiry)", deny.RetryAfter, wantRetryAfter)
+	}
+	wantReset := t0.Add(2 * time.Second).Add(10 * time.Second)
+	if !deny.Reset.Equal(wantReset) {
+		t.Errorf("Reset = %v, want %v (newest entry's expiry)", deny.Reset, wantReset)
+	}
+	retryAfterInstant := t0.Add(3 * time.Second).Add(deny.RetryAfter)
+	if !deny.Reset.After(retryAfterInstant) {
+		t.Errorf("Reset (%v) should be strictly after the next-slot instant (%v) under staggered load", deny.Reset, retryAfterInstant)
 	}
 }
 

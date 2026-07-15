@@ -43,22 +43,23 @@ func (b *slidingWindowBucket) step(limit config.Limit, now time.Time) Decision {
 		remaining = 0
 	}
 
-	// Reset is when the oldest counted request ages out of the window —
-	// the next instant a slot can possibly free up. Fully available (no
-	// counted requests) reports now.
-	reset := now
-	if len(b.timestamps) > 0 {
-		reset = b.timestamps[0].Add(window)
-	}
-
 	dec := Decision{
 		Allowed:   allowed,
 		Limit:     limit.Rate,
 		Remaining: remaining,
-		Reset:     reset,
+		// Reset is when the log is completely clear again: the newest
+		// counted entry's expiry, since it's the last to age out. This
+		// differs from RetryAfter below on purpose — at capacity with
+		// staggered requests, one slot frees well before all of them do.
+		Reset: now,
+	}
+	if len(b.timestamps) > 0 {
+		dec.Reset = b.timestamps[len(b.timestamps)-1].Add(window)
 	}
 	if !allowed {
-		dec.RetryAfter = reset.Sub(now)
+		// The oldest counted entry is the next (and only the next) one
+		// to age out, freeing exactly one slot.
+		dec.RetryAfter = b.timestamps[0].Add(window).Sub(now)
 	}
 	return dec
 }

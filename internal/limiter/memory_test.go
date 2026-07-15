@@ -95,6 +95,35 @@ func TestMemoryLimiterOverAdmission(t *testing.T) {
 	}
 }
 
+func TestMemoryLimiterCapsDistinctKeys(t *testing.T) {
+	// Identity isn't authenticated, so nothing stops a caller from
+	// varying X-API-Key per request; the cap is what stands between that
+	// and unbounded memory growth. Shrink it here instead of looping to
+	// the real six-figure count.
+	old := maxKeys
+	maxKeys = 2
+	t.Cleanup(func() { maxKeys = old })
+
+	limit := config.Limit{Algorithm: config.AlgoFixedWindow, Rate: 1, Window: config.Duration(time.Minute)}
+	m := NewMemoryLimiter(&manualClock{t: time.Unix(1_000_000_000, 0)})
+	ctx := context.Background()
+
+	if _, err := m.Allow(ctx, "a", limit); err != nil {
+		t.Fatalf("key a (within capacity): unexpected error: %v", err)
+	}
+	if _, err := m.Allow(ctx, "b", limit); err != nil {
+		t.Fatalf("key b (fills capacity): unexpected error: %v", err)
+	}
+	if _, err := m.Allow(ctx, "c", limit); err == nil {
+		t.Fatal("key c (beyond capacity): want error, got nil")
+	}
+	// The cap only gates brand-new keys; already-tracked ones are
+	// unaffected once the map is full.
+	if _, err := m.Allow(ctx, "a", limit); err != nil {
+		t.Errorf("already-tracked key a after capacity reached: unexpected error: %v", err)
+	}
+}
+
 func TestNew(t *testing.T) {
 	t.Run("memory backend", func(t *testing.T) {
 		lim, err := New(config.Limiter{Backend: config.BackendMemory}, RealClock{})
