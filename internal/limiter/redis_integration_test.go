@@ -16,6 +16,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"strconv"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -203,6 +204,163 @@ func TestRedisScriptFlushSelfHeals(t *testing.T) {
 	}
 	if dec.Allowed {
 		t.Error("6th request allowed: state was lost across SCRIPT FLUSH")
+	}
+}
+
+func TestRedisTokenBucketParity(t *testing.T) {
+	l := newIntegrationLimiter(t)
+	key := integrationKey(t, l, config.AlgoTokenBucket)
+	// rate 1/1m: the refill accrued during a µs-scale test (~1e-4
+	// tokens) cannot move floor(tokens), so the assertions stay exact.
+	limit := config.Limit{Algorithm: config.AlgoTokenBucket, Rate: 1, Burst: 5, Window: config.Duration(time.Minute)}
+	ctx := context.Background()
+
+	for i, wantRemaining := range []int{4, 3, 2, 1, 0} {
+		dec, err := l.Allow(ctx, key, limit)
+		if err != nil {
+			t.Fatalf("allow %d: %v", i+1, err)
+		}
+		if !dec.Allowed {
+			t.Fatalf("allow %d: denied, want the full burst admitted", i+1)
+		}
+		if dec.Limit != limit.Burst {
+			t.Errorf("allow %d: Limit = %d, want Burst %d", i+1, dec.Limit, limit.Burst)
+		}
+		if dec.Remaining != wantRemaining {
+			t.Errorf("allow %d: Remaining = %d, want %d", i+1, dec.Remaining, wantRemaining)
+		}
+	}
+
+	dec, err := l.Allow(ctx, key, limit)
+	if err != nil {
+		t.Fatalf("deny: %v", err)
+	}
+	if dec.Allowed {
+		t.Fatal("6th request allowed past an empty bucket")
+	}
+	if dec.Remaining != 0 {
+		t.Errorf("deny Remaining = %d, want 0", dec.Remaining)
+	}
+	// Next token lands one refill interval after the bucket emptied.
+	if dec.RetryAfter <= 50*time.Second || dec.RetryAfter > time.Minute {
+		t.Errorf("deny RetryAfter = %v, want in (50s, 1m]", dec.RetryAfter)
+	}
+
+	stateKey := "turnike:" + config.AlgoTokenBucket + ":" + key
+	raw, err := l.client.HGet(ctx, stateKey, "tokens").Result()
+	if err != nil {
+		t.Fatalf("HGET tokens: %v", err)
+	}
+	tokens, err := strconv.ParseFloat(raw, 64)
+	if err != nil {
+		t.Fatalf("stored tokens %q does not round-trip float64: %v", raw, err)
+	}
+	if tokens < 0 || tokens > 0.01 {
+		t.Errorf("stored tokens = %v, want ~0 after draining the burst", tokens)
+	}
+	// TTL = time to refill to full: 5 tokens at 1/minute, minus dust.
+	ttl, err := l.client.PTTL(ctx, stateKey).Result()
+	if err != nil {
+		t.Fatalf("PTTL: %v", err)
+	}
+	if ttl <= 4*time.Minute || ttl > 5*time.Minute {
+		t.Errorf("PTTL = %v, want in (4m, 5m] (time to full)", ttl)
+	}
+}
+
+func TestRedisTokenBucketNeverExceedsBurst(t *testing.T) {
+	l := newIntegrationLimiter(t)
+	key := integrationKey(t, l, config.AlgoTokenBucket)
+	limit := config.Limit{Algorithm: config.AlgoTokenBucket, Rate: 1, Burst: 5, Window: config.Duration(time.Second)}
+	ctx := context.Background()
+
+	// Seed state 1000h in the past (the local clock is fine here - the
+	// gap dwarfs any clock skew): the refill must clamp at burst, not
+	// accumulate 3.6M tokens.
+	stateKey := "turnike:" + config.AlgoTokenBucket + ":" + key
+	past := time.Now().Add(-1000 * time.Hour).UnixMicro()
+	if err := l.client.HSet(ctx, stateKey, "tokens", "1", "last_us", strconv.FormatInt(past, 10)).Err(); err != nil {
+		t.Fatalf("seed HSET: %v", err)
+	}
+
+	dec, err := l.Allow(ctx, key, limit)
+	if err != nil {
+		t.Fatalf("Allow: %v", err)
+	}
+	if !dec.Allowed {
+		t.Fatal("denied, want allowed from a refilled bucket")
+	}
+	if want := limit.Burst - 1; dec.Remaining != want {
+		t.Errorf("Remaining = %d, want %d (refill clamped at burst)", dec.Remaining, want)
+	}
+}
+
+func TestRedisTokenBucketRefill(t *testing.T) {
+	l := newIntegrationLimiter(t)
+	key := integrationKey(t, l, config.AlgoTokenBucket)
+	limit := config.Limit{Algorithm: config.AlgoTokenBucket, Rate: 1, Burst: 1, Window: config.Duration(time.Second)}
+	ctx := context.Background()
+
+	first, err := l.Allow(ctx, key, limit)
+	if err != nil || !first.Allowed {
+		t.Fatalf("first: dec=%+v err=%v, want allowed (fresh bucket starts full)", first, err)
+	}
+	second, err := l.Allow(ctx, key, limit)
+	if err != nil || second.Allowed {
+		t.Fatalf("second: dec=%+v err=%v, want denied (bucket empty)", second, err)
+	}
+	if second.RetryAfter <= 0 || second.RetryAfter > time.Second {
+		t.Errorf("deny RetryAfter = %v, want in (0, 1s]", second.RetryAfter)
+	}
+	// 1.1s of real time refills one whole token on the redis clock too.
+	time.Sleep(1100 * time.Millisecond)
+	third, err := l.Allow(ctx, key, limit)
+	if err != nil || !third.Allowed {
+		t.Fatalf("after refill: dec=%+v err=%v, want allowed", third, err)
+	}
+}
+
+func TestRedisTokenBucketHammer(t *testing.T) {
+	l := newIntegrationLimiter(t)
+	const burst = 50
+	const instances = 4
+	const perInstance = 100
+	// rate 1/1h: the refill accrued during the hammer (~1e-5 tokens)
+	// keeps "exactly burst admitted" an honest assertion.
+	limit := config.Limit{Algorithm: config.AlgoTokenBucket, Rate: 1, Burst: burst, Window: config.Duration(time.Hour)}
+	key := integrationKey(t, l, config.AlgoTokenBucket)
+
+	limiters := []*RedisLimiter{l}
+	for i := 1; i < instances; i++ {
+		li := NewRedisLimiter(config.Redis{Addr: os.Getenv("REDIS_ADDR")}, slog.New(slog.DiscardHandler))
+		t.Cleanup(func() { _ = li.Close() })
+		limiters = append(limiters, li)
+	}
+
+	ctx := context.Background()
+	var wg sync.WaitGroup
+	var allowed atomic.Int64
+	for _, li := range limiters {
+		for i := 0; i < perInstance; i++ {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				dec, err := li.Allow(ctx, key, limit)
+				if err != nil {
+					t.Error(err)
+					return
+				}
+				if dec.Allowed {
+					allowed.Add(1)
+				}
+			}()
+		}
+	}
+	wg.Wait()
+
+	if got := allowed.Load(); got != burst {
+		t.Errorf("allowed = %d over %d attempts from %d instances, want exactly %d",
+			got, instances*perInstance, instances, burst)
 	}
 }
 

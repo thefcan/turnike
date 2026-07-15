@@ -24,6 +24,9 @@ const (
 //go:embed scripts/fixed_window.lua
 var fixedWindowLua string
 
+//go:embed scripts/token_bucket.lua
+var tokenBucketLua string
+
 // scriptEntry binds one algorithm's Lua script to the glue that feeds
 // it and reads it back.
 type scriptEntry struct {
@@ -38,13 +41,20 @@ type scriptEntry struct {
 }
 
 // scripts maps each algorithm to its atomic check-and-consume script.
-// token_bucket and sliding_window land in the next commits.
+// sliding_window lands in the next commit.
 var scripts = map[string]scriptEntry{
 	config.AlgoFixedWindow: {
 		script:  redis.NewScript(fixedWindowLua),
 		limitOf: func(l config.Limit) int { return l.Rate },
 		args: func(l config.Limit, windowMicros int64) []any {
 			return []any{l.Rate, windowMicros}
+		},
+	},
+	config.AlgoTokenBucket: {
+		script:  redis.NewScript(tokenBucketLua),
+		limitOf: func(l config.Limit) int { return l.Burst },
+		args: func(l config.Limit, windowMicros int64) []any {
+			return []any{l.Burst, l.Rate, windowMicros}
 		},
 	},
 }
