@@ -62,13 +62,15 @@ func (m *MemoryLimiter) Allow(_ context.Context, key string, limit config.Limit)
 }
 
 // newBucket constructs the state for algorithm. Cases are added one per
-// milestone commit as each algorithm lands (token_bucket, then
-// sliding_window); until then, config-valid algorithms not yet
-// implemented fall through to the error below.
+// milestone commit as each algorithm lands (sliding_window next); until
+// then, config-valid algorithms not yet implemented fall through to the
+// error below.
 func newBucket(algorithm string) (bucket, error) {
 	switch algorithm {
 	case config.AlgoFixedWindow:
 		return &fixedWindowBucket{}, nil
+	case config.AlgoTokenBucket:
+		return &tokenBucket{}, nil
 	default:
 		return nil, fmt.Errorf("limiter: algorithm %q not implemented yet", algorithm)
 	}
