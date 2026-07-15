@@ -11,6 +11,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/thefcan/turnike/internal/config"
 )
@@ -51,9 +52,10 @@ func TestHandlerHealthEndpoints(t *testing.T) {
 
 func TestHandlerReadyCheckFailure(t *testing.T) {
 	up := echoUpstream(t, "api")
-	h := newTestHandler(t, slog.New(slog.DiscardHandler), up.URL,
+	var buf bytes.Buffer
+	h := newTestHandler(t, slog.New(slog.NewTextHandler(&buf, nil)), up.URL,
 		func(context.Context) error { return nil },
-		func(context.Context) error { return errors.New("redis is down") },
+		func(context.Context) error { return errors.New("dial tcp 10.0.0.5:6379: connect: connection refused") },
 	)
 
 	r := httptest.NewRequest("GET", "/readyz", nil)
@@ -62,8 +64,73 @@ func TestHandlerReadyCheckFailure(t *testing.T) {
 	if w.Code != http.StatusServiceUnavailable {
 		t.Errorf("/readyz = %d, want 503", w.Code)
 	}
-	if body := w.Body.String(); !strings.Contains(body, "redis is down") {
-		t.Errorf("/readyz body = %q, want the check's reason", body)
+	// The reason goes to the log; the body stays generic - these
+	// endpoints answer any caller ahead of the route table, and the
+	// error names internal topology.
+	if body := w.Body.String(); strings.Contains(body, "10.0.0.5") {
+		t.Errorf("/readyz body leaks the dependency address: %q", body)
+	}
+	if !strings.Contains(buf.String(), "10.0.0.5") {
+		t.Errorf("readiness failure reason missing from the log:\n%s", buf.String())
+	}
+}
+
+func TestHandlerHealthMethodGuard(t *testing.T) {
+	up := echoUpstream(t, "api")
+	h := newTestHandler(t, slog.New(slog.DiscardHandler), up.URL)
+
+	// A monitor probing with the wrong method must not read healthy.
+	for _, path := range []string{"/healthz", "/readyz"} {
+		for _, method := range []string{"POST", "PUT", "DELETE"} {
+			r := httptest.NewRequest(method, path, nil)
+			w := httptest.NewRecorder()
+			h.ServeHTTP(w, r)
+			if w.Code != http.StatusMethodNotAllowed {
+				t.Errorf("%s %s = %d, want 405", method, path, w.Code)
+			}
+			if got := w.Header().Get("Allow"); got != "GET, HEAD" {
+				t.Errorf("%s %s Allow = %q, want %q", method, path, got, "GET, HEAD")
+			}
+		}
+		// HEAD is a probe verb and must keep working.
+		r := httptest.NewRequest("HEAD", path, nil)
+		w := httptest.NewRecorder()
+		h.ServeHTTP(w, r)
+		if w.Code != http.StatusOK {
+			t.Errorf("HEAD %s = %d, want 200", path, w.Code)
+		}
+	}
+
+	// The proxy branch stays method-agnostic: a POST to a routed path
+	// must still be forwarded, not 405'd.
+	r := httptest.NewRequest("POST", "/api/things", strings.NewReader("{}"))
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, r)
+	if w.Code != http.StatusOK {
+		t.Errorf("POST /api/things = %d, want 200 (proxied)", w.Code)
+	}
+}
+
+func TestHandlerReadyCheckTimeout(t *testing.T) {
+	up := echoUpstream(t, "api")
+	h := newTestHandler(t, slog.New(slog.DiscardHandler), up.URL,
+		// A hung dependency: blocks until the per-check budget cancels it.
+		func(ctx context.Context) error { <-ctx.Done(); return ctx.Err() },
+	)
+
+	start := time.Now()
+	r := httptest.NewRequest("GET", "/readyz", nil)
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, r)
+	elapsed := time.Since(start)
+
+	if w.Code != http.StatusServiceUnavailable {
+		t.Errorf("/readyz = %d, want 503 from the timed-out check", w.Code)
+	}
+	// The budget is 1s; well under 5s proves the probe wasn't pinned
+	// for the prober's lifetime.
+	if elapsed > 5*time.Second {
+		t.Errorf("/readyz took %v, want ~%v (per-check timeout)", elapsed, readyCheckTimeout)
 	}
 }
 

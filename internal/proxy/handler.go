@@ -4,15 +4,23 @@ import (
 	"context"
 	"log/slog"
 	"net/http"
+	"time"
 
 	"github.com/thefcan/turnike/internal/config"
 	"github.com/thefcan/turnike/internal/limiter"
 )
 
 // ReadyCheck reports whether a dependency is ready to serve traffic; a
-// non-nil error turns /readyz into a 503. The redis backend plugs in a
-// ping here in M3.
+// non-nil error turns /readyz into a 503. The redis backend's ping
+// plugs in here - but only under fail_closed (see cmd/gateway/main.go
+// for the policy reasoning).
 type ReadyCheck func(context.Context) error
+
+// readyCheckTimeout bounds each ReadyCheck so a hung dependency turns
+// into a fast 503 instead of a probe pinned until the prober gives up.
+// A dependency that cannot answer within a second is not ready by any
+// useful definition; a knob for this would be pure config surface.
+const readyCheckTimeout = time.Second
 
 // NewHandler wires the health endpoints, the request-ID/access-log
 // middleware and the gateway (with the given Limiter) into the root
@@ -27,19 +35,39 @@ type ReadyCheck func(context.Context) error
 // 301-redirects uncleaned paths, which would break POSTs through the
 // gateway; path cleaning belongs to the route table alone.
 func NewHandler(cfg *config.Config, logger *slog.Logger, lim limiter.Limiter, ready ...ReadyCheck) (http.Handler, error) {
-	gw, err := NewGateway(cfg.Routes, cfg.Upstream, lim, logger)
+	gw, err := NewGateway(cfg.Routes, cfg.Upstream, lim, cfg.Limiter.Redis.OnError, logger)
 	if err != nil {
 		return nil, err
 	}
 	proxied := Middleware(logger)(gw)
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
-		case "/healthz":
-			writeText(w, http.StatusOK, "ok")
-		case "/readyz":
+		case "/healthz", "/readyz":
+			// Probes speak GET/HEAD; answering 200 to anything else
+			// would let a misconfigured monitor read healthy forever.
+			// The proxy branch below stays method-agnostic - the
+			// gateway must forward every method. (net/http suppresses
+			// response bodies on HEAD by itself.)
+			if r.Method != http.MethodGet && r.Method != http.MethodHead {
+				w.Header().Set("Allow", "GET, HEAD")
+				writeText(w, http.StatusMethodNotAllowed, "method not allowed")
+				return
+			}
+			if r.URL.Path == "/healthz" {
+				writeText(w, http.StatusOK, "ok")
+				return
+			}
 			for _, check := range ready {
-				if err := check(r.Context()); err != nil {
-					writeText(w, http.StatusServiceUnavailable, "not ready: "+err.Error())
+				cctx, cancel := context.WithTimeout(r.Context(), readyCheckTimeout)
+				err := check(cctx)
+				cancel()
+				if err != nil {
+					// Reason to the log, not the body: these endpoints
+					// answer ahead of the route table to any caller,
+					// and dependency errors name internal topology
+					// (e.g. the redis addr).
+					logger.Warn("readiness check failed", "err", err)
+					writeText(w, http.StatusServiceUnavailable, "not ready")
 					return
 				}
 			}

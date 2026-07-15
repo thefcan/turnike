@@ -22,7 +22,7 @@ func (c *manualClock) Advance(d time.Duration) { c.t = c.t.Add(d) }
 
 func newRateLimitedGateway(t *testing.T, routes []config.Route, clock *manualClock) (*Gateway, *httptest.Server) {
 	t.Helper()
-	g, err := NewGateway(routes, config.Upstream{}, limiter.NewMemoryLimiter(clock), slog.New(slog.DiscardHandler))
+	g, err := NewGateway(routes, config.Upstream{}, limiter.NewMemoryLimiter(clock), config.OnErrorFailOpen, slog.New(slog.DiscardHandler))
 	if err != nil {
 		t.Fatalf("NewGateway: %v", err)
 	}

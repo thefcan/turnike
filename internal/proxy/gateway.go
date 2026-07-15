@@ -20,18 +20,23 @@ import (
 
 // Gateway routes requests to their upstream via one reverse proxy per
 // route, after a per-route, per-identity rate-limit check. Unmatched
-// paths get a 404, denied requests a 429, upstream failures a 502.
+// paths get a 404, denied requests a 429, upstream failures a 502, and
+// a limiter that cannot answer gets the configured on_error treatment.
 type Gateway struct {
 	table   *Table
 	proxies map[string]*httputil.ReverseProxy // keyed by normalized Entry.Prefix
 	limiter limiter.Limiter
+	onError string // config.OnError*: what a limiter error means here
 	logger  *slog.Logger
 }
 
 // NewGateway compiles routes into a gateway. All routes share one
 // transport (and thus one connection pool) with the given timeouts, and
-// the given Limiter for rate-limit decisions.
-func NewGateway(routes []config.Route, up config.Upstream, lim limiter.Limiter, logger *slog.Logger) (*Gateway, error) {
+// the given Limiter for rate-limit decisions. onError is the redis
+// failure policy (config.OnError*): only fail_closed changes behavior
+// here - degrade is resolved inside the redis limiter itself, so by the
+// time an error reaches the gateway, open and degrade act alike.
+func NewGateway(routes []config.Route, up config.Upstream, lim limiter.Limiter, onError string, logger *slog.Logger) (*Gateway, error) {
 	transport := &http.Transport{
 		DialContext:           (&net.Dialer{Timeout: time.Duration(up.DialTimeout)}).DialContext,
 		TLSHandshakeTimeout:   5 * time.Second,
@@ -44,6 +49,7 @@ func NewGateway(routes []config.Route, up config.Upstream, lim limiter.Limiter, 
 		table:   NewTable(routes),
 		proxies: make(map[string]*httputil.ReverseProxy, len(routes)),
 		limiter: lim,
+		onError: onError,
 		logger:  logger,
 	}
 	for _, e := range g.table.entries {
@@ -95,12 +101,19 @@ func (g *Gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	switch dec, err := g.limiter.Allow(r.Context(), key, eff); {
 	case err != nil:
-		// Fail open: an internal limiter error shouldn't take the
-		// upstream down with it. M2's in-memory backend only reaches
-		// this for a config-invalid algorithm, which validation already
-		// rejects before requests arrive; M3's Redis backend makes
-		// fail-open vs fail-closed an explicit policy choice.
+		// The redis backend errors here when redis cannot answer and the
+		// policy is not degrade (degrade answers from its in-memory
+		// fallback before the error ever reaches us). fail_closed turns
+		// it into a 503; every other policy fails open - proxying
+		// unlimited beats taking the upstream down with the limiter.
+		// The memory backend still only errors on states validation
+		// rejects, plus its at-capacity guard, which fails open by
+		// design.
 		g.logger.ErrorContext(r.Context(), "limiter error", "err", err, "request_id", RequestIDFrom(r.Context()))
+		if g.onError == config.OnErrorFailClosed {
+			writeLimiterUnavailable(w)
+			return
+		}
 	case !dec.Allowed:
 		writeRateLimitHeaders(w, dec)
 		writeTooManyRequests(w, dec)
@@ -121,6 +134,20 @@ func writeRateLimitHeaders(w http.ResponseWriter, dec limiter.Decision) {
 	h.Set("X-RateLimit-Limit", strconv.Itoa(dec.Limit))
 	h.Set("X-RateLimit-Remaining", strconv.Itoa(dec.Remaining))
 	h.Set("X-RateLimit-Reset", strconv.FormatInt(dec.Reset.Unix(), 10))
+}
+
+// writeLimiterUnavailable is the fail_closed answer: 503, not 429 - the
+// client did nothing wrong - and no X-RateLimit-* headers, because there
+// is no quota state to report. Retry-After derives from the breaker
+// cooldown, so the header can never advise a shorter wait than the next
+// possible recovery probe.
+func writeLimiterUnavailable(w http.ResponseWriter) {
+	secs := int64(math.Ceil(limiter.BreakerCooldown.Seconds()))
+	if secs < 1 {
+		secs = 1
+	}
+	w.Header().Set("Retry-After", strconv.FormatInt(secs, 10))
+	http.Error(w, "rate limiter unavailable", http.StatusServiceUnavailable)
 }
 
 // writeTooManyRequests writes Retry-After and a 429. Callers must set

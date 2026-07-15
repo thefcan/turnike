@@ -68,7 +68,27 @@ func serve(ctx context.Context, cfg *config.Config, ln net.Listener, logger *slo
 	if err != nil {
 		return err
 	}
-	handler, err := proxy.NewHandler(cfg, logger, lim) // no ready checks until M3's Redis ping
+	var ready []proxy.ReadyCheck
+	if rl, ok := lim.(*limiter.RedisLimiter); ok {
+		// Deferred so it runs only after srv.Shutdown has returned on
+		// every exit path: draining in-flight requests keep a live
+		// redis client (the drain test pins this ordering).
+		defer func() {
+			if err := rl.Close(); err != nil {
+				logger.Warn("redis close", "err", err)
+			}
+		}()
+		// The redis ping gates readiness only under fail_closed, where
+		// the instance genuinely cannot serve. Under fail_open/degrade
+		// it still does useful work - and redis being a *shared*
+		// dependency, an unconditional 503 would drain every instance
+		// from the LB at once, manufacturing exactly the outage those
+		// policies exist to survive.
+		if cfg.Limiter.Redis.OnError == config.OnErrorFailClosed {
+			ready = append(ready, rl.Ping)
+		}
+	}
+	handler, err := proxy.NewHandler(cfg, logger, lim, ready...)
 	if err != nil {
 		return err
 	}

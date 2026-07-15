@@ -63,7 +63,7 @@ func echoUpstream(t *testing.T, marker string) *httptest.Server {
 
 func newTestGateway(t *testing.T, routes []config.Route) *Gateway {
 	t.Helper()
-	g, err := NewGateway(routes, config.Upstream{}, allowAllLimiter{}, slog.New(slog.DiscardHandler))
+	g, err := NewGateway(routes, config.Upstream{}, allowAllLimiter{}, config.OnErrorFailOpen, slog.New(slog.DiscardHandler))
 	if err != nil {
 		t.Fatalf("NewGateway: %v", err)
 	}
@@ -194,7 +194,7 @@ func TestGatewayResponseHeaderTimeoutIs502(t *testing.T) {
 	g, err := NewGateway(
 		[]config.Route{{Prefix: "/api/", Upstream: slow.URL}},
 		config.Upstream{ResponseHeaderTimeout: config.Duration(10 * time.Millisecond)},
-		allowAllLimiter{}, slog.New(slog.DiscardHandler))
+		allowAllLimiter{}, config.OnErrorFailOpen, slog.New(slog.DiscardHandler))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -213,14 +213,13 @@ func TestGatewayResponseHeaderTimeoutIs502(t *testing.T) {
 }
 
 func TestGatewayFailsOpenOnLimiterError(t *testing.T) {
-	// An internal limiter error must not take the upstream down with it:
-	// the request still proceeds, just without X-RateLimit-* (there's no
-	// Decision to report). config-validated algorithms never actually
-	// produce this error in M2 — this test exists so the path isn't
-	// silently dead code once M3's Redis backend can fail for real.
+	// Under fail_open a limiter error must not take the upstream down
+	// with it: the request still proceeds, just without X-RateLimit-*
+	// (there's no Decision to report). The redis backend produces this
+	// error for real when redis is down and the policy isn't degrade.
 	up := echoUpstream(t, "api")
 	g, err := NewGateway([]config.Route{{Prefix: "/api/", Upstream: up.URL}},
-		config.Upstream{}, erroringLimiter{}, slog.New(slog.DiscardHandler))
+		config.Upstream{}, erroringLimiter{}, config.OnErrorFailOpen, slog.New(slog.DiscardHandler))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -234,6 +233,40 @@ func TestGatewayFailsOpenOnLimiterError(t *testing.T) {
 	}
 	if got := w.Header().Get("X-RateLimit-Limit"); got != "" {
 		t.Errorf("X-RateLimit-Limit = %q, want absent — no Decision was returned to report", got)
+	}
+}
+
+func TestGatewayFailsClosedOnLimiterError(t *testing.T) {
+	// Under fail_closed the same limiter error must reject instead:
+	// 503 (not 429 - the client did nothing wrong), Retry-After from
+	// the breaker cooldown, no X-RateLimit-* headers, upstream not hit.
+	upstreamHit := false
+	up := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+		upstreamHit = true
+	}))
+	t.Cleanup(up.Close)
+
+	g, err := NewGateway([]config.Route{{Prefix: "/api/", Upstream: up.URL}},
+		config.Upstream{}, erroringLimiter{}, config.OnErrorFailClosed, slog.New(slog.DiscardHandler))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	r := httptest.NewRequest("GET", "/api/x", nil)
+	w := httptest.NewRecorder()
+	g.ServeHTTP(w, r)
+
+	if w.Code != http.StatusServiceUnavailable {
+		t.Errorf("status = %d, want 503", w.Code)
+	}
+	if got := w.Header().Get("Retry-After"); got != "1" {
+		t.Errorf("Retry-After = %q, want %q (the breaker cooldown, ceil'd)", got, "1")
+	}
+	if got := w.Header().Get("X-RateLimit-Limit"); got != "" {
+		t.Errorf("X-RateLimit-Limit = %q, want absent — there is no quota state to report", got)
+	}
+	if upstreamHit {
+		t.Error("request was proxied despite fail_closed")
 	}
 }
 

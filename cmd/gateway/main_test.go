@@ -43,6 +43,70 @@ routes:
 	}
 }
 
+// TestReadyzReflectsPolicyWhenRedisDown pins the wiring contract from
+// the advisor's pre-review: the redis ping gates readiness only under
+// fail_closed, where the instance genuinely cannot serve. Under degrade
+// it still does useful work via the in-memory fallback - and redis
+// being a shared dependency, a 503 would drain every instance from the
+// LB at once. A future "cleanup" that unconditionalizes the ping breaks
+// this test instead of production.
+func TestReadyzReflectsPolicyWhenRedisDown(t *testing.T) {
+	cases := []struct {
+		policy     string
+		wantStatus int
+	}{
+		{"fail_closed", http.StatusServiceUnavailable},
+		{"degrade", http.StatusOK},
+	}
+	for _, tc := range cases {
+		t.Run(tc.policy, func(t *testing.T) {
+			cfg, err := config.Parse(fmt.Appendf(nil, `
+server:
+  listen: "127.0.0.1:0"
+  shutdown_timeout: 2s
+limiter:
+  backend: redis
+  redis: {addr: "127.0.0.1:1", on_error: %s}
+routes:
+  - prefix: /
+    upstream: http://localhost:9000
+    limit: {algorithm: token_bucket, rate: 1, burst: 1}
+`, tc.policy))
+			if err != nil {
+				t.Fatalf("Parse: %v", err)
+			}
+			ln, err := net.Listen("tcp", "127.0.0.1:0")
+			if err != nil {
+				t.Fatalf("Listen: %v", err)
+			}
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			errCh := make(chan error, 1)
+			go func() { errCh <- serve(ctx, cfg, ln, slog.New(slog.DiscardHandler)) }()
+
+			resp, err := http.Get("http://" + ln.Addr().String() + "/readyz")
+			if err != nil {
+				t.Fatalf("GET /readyz: %v", err)
+			}
+			_ = resp.Body.Close()
+			if resp.StatusCode != tc.wantStatus {
+				t.Errorf("policy %s with redis down: /readyz = %d, want %d",
+					tc.policy, resp.StatusCode, tc.wantStatus)
+			}
+
+			cancel()
+			select {
+			case err := <-errCh:
+				if err != nil {
+					t.Fatalf("serve returned %v, want nil", err)
+				}
+			case <-time.After(5 * time.Second):
+				t.Fatal("serve did not return after cancellation")
+			}
+		})
+	}
+}
+
 // TestServeDrainsInFlightRequests proves shutdown actually drains: a
 // request held in flight across the shutdown signal must complete with
 // the gateway's rate-limit headers while new connections are refused.
