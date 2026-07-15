@@ -35,7 +35,7 @@ func newIntegrationLimiter(t *testing.T) *RedisLimiter {
 	if addr == "" {
 		t.Skip("REDIS_ADDR not set; redis integration test skipped")
 	}
-	l := NewRedisLimiter(config.Redis{Addr: addr}, slog.New(slog.DiscardHandler))
+	l := NewRedisLimiter(config.Redis{Addr: addr}, RealClock{}, slog.New(slog.DiscardHandler))
 	t.Cleanup(func() { _ = l.Close() })
 	if err := l.Ping(context.Background()); err != nil {
 		t.Fatalf("REDIS_ADDR=%q is set but redis is unreachable: %v", addr, err)
@@ -334,7 +334,7 @@ func TestRedisTokenBucketHammer(t *testing.T) {
 
 	limiters := []*RedisLimiter{l}
 	for i := 1; i < instances; i++ {
-		li := NewRedisLimiter(config.Redis{Addr: os.Getenv("REDIS_ADDR")}, slog.New(slog.DiscardHandler))
+		li := NewRedisLimiter(config.Redis{Addr: os.Getenv("REDIS_ADDR")}, RealClock{}, slog.New(slog.DiscardHandler))
 		t.Cleanup(func() { _ = li.Close() })
 		limiters = append(limiters, li)
 	}
@@ -382,7 +382,7 @@ func TestRedisFixedWindowHammer(t *testing.T) {
 	// claim - N gateways sharing one redis admit exactly rate, total.
 	limiters := []*RedisLimiter{l}
 	for i := 1; i < instances; i++ {
-		li := NewRedisLimiter(config.Redis{Addr: os.Getenv("REDIS_ADDR")}, slog.New(slog.DiscardHandler))
+		li := NewRedisLimiter(config.Redis{Addr: os.Getenv("REDIS_ADDR")}, RealClock{}, slog.New(slog.DiscardHandler))
 		t.Cleanup(func() { _ = li.Close() })
 		limiters = append(limiters, li)
 	}
@@ -552,7 +552,7 @@ func TestRedisSlidingWindowHammer(t *testing.T) {
 
 	limiters := []*RedisLimiter{l}
 	for i := 1; i < instances; i++ {
-		li := NewRedisLimiter(config.Redis{Addr: os.Getenv("REDIS_ADDR")}, slog.New(slog.DiscardHandler))
+		li := NewRedisLimiter(config.Redis{Addr: os.Getenv("REDIS_ADDR")}, RealClock{}, slog.New(slog.DiscardHandler))
 		t.Cleanup(func() { _ = li.Close() })
 		limiters = append(limiters, li)
 	}

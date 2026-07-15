@@ -82,7 +82,12 @@ func (f *fakeScripter) ScriptLoad(ctx context.Context, _ string) *redis.StringCm
 }
 
 func newFakeRedisLimiter(f *fakeScripter) *RedisLimiter {
-	return &RedisLimiter{scripter: f, logger: slog.New(slog.DiscardHandler)}
+	logger := slog.New(slog.DiscardHandler)
+	return &RedisLimiter{
+		scripter: f,
+		breaker:  newBreaker(&manualClock{t: time.Unix(1_000_000_000, 0)}, logger),
+		logger:   logger,
+	}
 }
 
 func TestRedisLimiterKeySchemeAndArgs(t *testing.T) {
@@ -203,5 +208,64 @@ func TestRedisLimiterUnknownAlgorithm(t *testing.T) {
 	_, err := l.Allow(context.Background(), "k", limit)
 	if err == nil || !strings.Contains(err.Error(), "no redis script") {
 		t.Fatalf("err = %v, want the unknown-algorithm error", err)
+	}
+}
+
+func TestRedisLimiterDegradeFallsBackToMemory(t *testing.T) {
+	clock := &manualClock{t: time.Unix(1_000_000_000, 0)}
+	logger := slog.New(slog.DiscardHandler)
+	f := &fakeScripter{err: errors.New("dial tcp: connection refused")}
+	l := &RedisLimiter{
+		scripter: f,
+		breaker:  newBreaker(clock, logger),
+		fallback: NewMemoryLimiter(clock),
+		logger:   logger,
+	}
+	limit := config.Limit{Algorithm: config.AlgoFixedWindow, Rate: 2, Window: config.Duration(time.Minute)}
+
+	// A fresh in-memory bucket answers: allowed with Remaining = rate-1,
+	// which the erroring fake could never have produced.
+	dec, err := l.Allow(context.Background(), "k", limit)
+	if err != nil {
+		t.Fatalf("Allow under degrade: %v, want the fallback to answer", err)
+	}
+	if !dec.Allowed || dec.Remaining != 1 {
+		t.Errorf("Decision = %+v, want allowed with Remaining 1 from a fresh memory bucket", dec)
+	}
+	// And the fallback enforces: the instance-local quota still denies.
+	if dec, _ := l.Allow(context.Background(), "k", limit); !dec.Allowed {
+		t.Fatalf("second request: %+v, want allowed (rate 2)", dec)
+	}
+	if dec, _ := l.Allow(context.Background(), "k", limit); dec.Allowed {
+		t.Error("third request allowed: the degrade fallback is not limiting")
+	}
+}
+
+func TestRedisLimiterBreakerStopsCallingRedis(t *testing.T) {
+	clock := &manualClock{t: time.Unix(1_000_000_000, 0)}
+	logger := slog.New(slog.DiscardHandler)
+	f := &fakeScripter{err: errors.New("dial tcp: connection refused")}
+	l := &RedisLimiter{
+		scripter: f,
+		breaker:  newBreaker(clock, logger),
+		fallback: NewMemoryLimiter(clock),
+		logger:   logger,
+	}
+	limit := config.Limit{Algorithm: config.AlgoFixedWindow, Rate: 100, Window: config.Duration(time.Minute)}
+
+	for i := 0; i < 10; i++ {
+		dec, err := l.Allow(context.Background(), "k", limit)
+		if err != nil {
+			t.Fatalf("Allow %d: %v, want the fallback to absorb the failure", i+1, err)
+		}
+		if !dec.Allowed {
+			t.Fatalf("Allow %d: denied at rate 100", i+1)
+		}
+	}
+	// The breaker tripped at the threshold: redis stopped being dialed
+	// even though all 10 requests were answered (by the fallback).
+	if f.evalShaCalls != breakerFailureThreshold {
+		t.Errorf("redis saw %d calls over 10 requests, want exactly %d (breaker must short-circuit the rest)",
+			f.evalShaCalls, breakerFailureThreshold)
 	}
 }

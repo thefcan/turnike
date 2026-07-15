@@ -78,16 +78,25 @@ var scripts = map[string]scriptEntry{
 // clock. Script dispatch uses EVALSHA with go-redis's EVAL fallback on
 // NOSCRIPT - and EVAL re-populates the server's script cache, so a redis
 // restart or SCRIPT FLUSH self-heals on the very next decision.
+//
+// Every decision goes through the circuit breaker regardless of policy;
+// the on_error policy only decides what a failure (or an open circuit)
+// means: degrade is handled here via fallback, fail_open/fail_closed by
+// the gateway on the returned error.
 type RedisLimiter struct {
 	client   *redis.Client
 	scripter redis.Scripter // == client in production; a fake in unit tests
+	breaker  *breaker
+	fallback Limiter // in-memory stand-in while redis is down; nil unless on_error: degrade
 	logger   *slog.Logger
 }
 
 // NewRedisLimiter builds the redis backend for cfg. Construction never
 // fails on an unreachable redis: crash-looping while redis is briefly
 // down would be strictly worse than coming up under the failure policy.
-func NewRedisLimiter(cfg config.Redis, logger *slog.Logger) *RedisLimiter {
+// clock drives the breaker and the degrade fallback; decisions
+// themselves only ever see redis TIME.
+func NewRedisLimiter(cfg config.Redis, clock Clock, logger *slog.Logger) *RedisLimiter {
 	client := redis.NewClient(&redis.Options{
 		Addr:         cfg.Addr,
 		DialTimeout:  redisDialTimeout,
@@ -98,7 +107,19 @@ func NewRedisLimiter(cfg config.Redis, logger *slog.Logger) *RedisLimiter {
 		// worst-case decision latency.
 		MaxRetries: -1,
 	})
-	l := &RedisLimiter{client: client, scripter: client, logger: logger}
+	l := &RedisLimiter{
+		client:   client,
+		scripter: client,
+		breaker:  newBreaker(clock, logger),
+		logger:   logger,
+	}
+	if cfg.OnError == config.OnErrorDegrade {
+		// Built once at boot, not per breaker trip: a flapping breaker
+		// must not churn allocations, and stale state self-heals anyway
+		// (all three algorithms evict or refill by timestamp, so
+		// anything older than a window is inert).
+		l.fallback = NewMemoryLimiter(clock)
+	}
 
 	// Best-effort eager SCRIPT LOAD: a Lua syntax error surfaces at boot
 	// instead of on the first request, and that request stays a 1-RTT
@@ -132,9 +153,23 @@ func (l *RedisLimiter) Allow(ctx context.Context, key string, limit config.Limit
 	// The memory backend's state key under the settled turnike: prefix;
 	// end to end that is turnike:{algo}:{route_prefix}:{identity}.
 	stateKey := "turnike:" + limit.Algorithm + ":" + key
-	vals, err := entry.script.Run(ctx, l.scripter,
-		[]string{stateKey}, entry.args(limit, windowMicros)...).Int64Slice()
+	var vals []int64
+	err := l.breaker.do(func() error {
+		var runErr error
+		vals, runErr = entry.script.Run(ctx, l.scripter,
+			[]string{stateKey}, entry.args(limit, windowMicros)...).Int64Slice()
+		return runErr
+	})
 	if err != nil {
+		if l.fallback != nil {
+			// degrade: per-instance approximate limiting while redis is
+			// unavailable. The headers stay real - they describe the
+			// instance-local quota - and over-admission is bounded by
+			// N_instances × limit. A residual fallback error (the
+			// maxKeys cap) propagates to the gateway's fail-open branch:
+			// redis, then memory, then open.
+			return l.fallback.Allow(ctx, key, limit)
+		}
 		return Decision{}, fmt.Errorf("limiter: redis %s: %w", limit.Algorithm, err)
 	}
 	return decisionFromReply(vals, entry.limitOf(limit))
@@ -157,8 +192,10 @@ func decisionFromReply(vals []int64, limit int) (Decision, error) {
 }
 
 // Ping reports whether redis is reachable; its method value satisfies
-// proxy.ReadyCheck. A readiness probe must report ground truth, so this
-// always goes straight to redis.
+// proxy.ReadyCheck. It deliberately bypasses the breaker, like the
+// boot-time script loads: a readiness probe must report ground truth,
+// not a verdict up to one cooldown stale - and probe traffic must not
+// feed the breaker's failure count while request traffic is quiet.
 func (l *RedisLimiter) Ping(ctx context.Context) error {
 	return l.client.Ping(ctx).Err()
 }

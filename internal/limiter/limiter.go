@@ -59,7 +59,7 @@ func New(cfg config.Limiter, clock Clock, logger *slog.Logger) (Limiter, error) 
 	case config.BackendMemory:
 		return NewMemoryLimiter(clock), nil
 	case config.BackendRedis:
-		return NewRedisLimiter(cfg.Redis, logger), nil
+		return NewRedisLimiter(cfg.Redis, clock, logger), nil
 	default:
 		// Unreachable after config validation, but don't silently no-op.
 		return nil, fmt.Errorf("limiter: unknown backend %q", cfg.Backend)

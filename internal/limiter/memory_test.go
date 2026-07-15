@@ -153,6 +153,9 @@ func TestNew(t *testing.T) {
 		if !ok {
 			t.Fatalf("New returned %T, want *RedisLimiter", lim)
 		}
+		if rl.fallback == nil {
+			t.Error("on_error: degrade built no in-memory fallback")
+		}
 		if err := rl.Close(); err != nil {
 			t.Errorf("Close: %v", err)
 		}
