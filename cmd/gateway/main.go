@@ -6,6 +6,7 @@ import (
 	"errors"
 	"flag"
 	"log/slog"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
@@ -43,9 +44,26 @@ func main() {
 	}
 }
 
-// run serves the gateway until it fails or ctx is canceled, then drains
-// in-flight requests for at most the configured shutdown timeout.
+// run binds cfg.Server.Listen and serves the gateway on it until it
+// fails or ctx is canceled, then drains in-flight requests for at most
+// the configured shutdown timeout.
 func run(ctx context.Context, cfg *config.Config, logger *slog.Logger) error {
+	ln, err := net.Listen("tcp", cfg.Server.Listen)
+	if err != nil {
+		return err
+	}
+	return serve(ctx, cfg, ln, logger)
+}
+
+// serve runs the gateway on ln — which it owns and closes — until it
+// fails or ctx is canceled, then drains in-flight requests for at most
+// the configured shutdown timeout. Split from run so tests can bind
+// their own listener and learn the real port.
+func serve(ctx context.Context, cfg *config.Config, ln net.Listener, logger *slog.Logger) error {
+	// Serve/Shutdown close ln themselves; closing again is a harmless
+	// ErrClosed. This covers the error returns before Serve starts.
+	defer func() { _ = ln.Close() }()
+
 	lim, err := limiter.New(cfg.Limiter, limiter.RealClock{})
 	if err != nil {
 		return err
@@ -56,7 +74,6 @@ func run(ctx context.Context, cfg *config.Config, logger *slog.Logger) error {
 	}
 
 	srv := &http.Server{
-		Addr:              cfg.Server.Listen,
 		Handler:           handler,
 		ReadHeaderTimeout: time.Duration(cfg.Server.ReadHeaderTimeout),
 		ReadTimeout:       time.Duration(cfg.Server.ReadTimeout),
@@ -67,8 +84,8 @@ func run(ctx context.Context, cfg *config.Config, logger *slog.Logger) error {
 
 	errCh := make(chan error, 1)
 	go func() {
-		logger.Info("gateway listening", "addr", cfg.Server.Listen)
-		errCh <- srv.ListenAndServe()
+		logger.Info("gateway listening", "addr", ln.Addr().String())
+		errCh <- srv.Serve(ln)
 	}()
 
 	select {
