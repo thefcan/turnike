@@ -110,9 +110,11 @@ Advisor backlog still open (not M2-coupled, unresolved):
   entries (`maxKeys` in memory.go) — identity is unauthenticated
   (`X-API-Key` is free-form client input), so an unbounded map would
   let any caller inflate gateway memory just by varying the header.
-  Past the cap, a new key fails open rather than being tracked; no
-  background reaper. M3's Redis TTLs remove the need for the cap
-  entirely rather than replacing it with a smarter one.
+  Past the cap a brand-new key's request is allowed — it fails open at
+  the gateway (logged, no X-RateLimit-* headers) — the key is not
+  tracked, and nothing is evicted; already-tracked keys keep limiting
+  normally. No background reaper. M3's Redis TTLs remove the need for
+  the cap entirely rather than replacing it with a smarter one.
 - `tokenBucket`'s admit check tolerates `1 - 1e-9` instead of a strict
   `>= 1`: float64 refill arithmetic can land exactly-1.0-in-real-math
   one ULP under for rate/window ratios that don't divide evenly (e.g.
