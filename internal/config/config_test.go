@@ -82,6 +82,76 @@ routes:
 			wantErr: "not found in type",
 		},
 		{
+			name: "timeout defaults applied",
+			yaml: `
+routes:
+  - prefix: /
+    upstream: http://localhost:9000
+    limit: {algorithm: token_bucket, rate: 1, burst: 1}
+`,
+			check: func(t *testing.T, cfg *Config) {
+				t.Helper()
+				for _, tt := range []struct {
+					name string
+					got  Duration
+					want time.Duration
+				}{
+					{"read_header_timeout", cfg.Server.ReadHeaderTimeout, 5 * time.Second},
+					{"read_timeout", cfg.Server.ReadTimeout, 30 * time.Second},
+					{"write_timeout", cfg.Server.WriteTimeout, 60 * time.Second},
+					{"idle_timeout", cfg.Server.IdleTimeout, 120 * time.Second},
+					{"shutdown_timeout", cfg.Server.ShutdownTimeout, 10 * time.Second},
+					{"dial_timeout", cfg.Upstream.DialTimeout, 5 * time.Second},
+					{"response_header_timeout", cfg.Upstream.ResponseHeaderTimeout, 10 * time.Second},
+				} {
+					if time.Duration(tt.got) != tt.want {
+						t.Errorf("%s = %v, want default %v", tt.name, time.Duration(tt.got), tt.want)
+					}
+				}
+			},
+		},
+		{
+			name: "explicit timeouts parsed",
+			yaml: `
+server:
+  read_timeout: 250ms
+  shutdown_timeout: 3s
+upstream:
+  dial_timeout: 1s
+routes:
+  - prefix: /
+    upstream: http://localhost:9000
+    limit: {algorithm: token_bucket, rate: 1, burst: 1}
+`,
+			check: func(t *testing.T, cfg *Config) {
+				t.Helper()
+				if got := time.Duration(cfg.Server.ReadTimeout); got != 250*time.Millisecond {
+					t.Errorf("read_timeout = %v, want 250ms", got)
+				}
+				if got := time.Duration(cfg.Server.ShutdownTimeout); got != 3*time.Second {
+					t.Errorf("shutdown_timeout = %v, want 3s", got)
+				}
+				if got := time.Duration(cfg.Upstream.DialTimeout); got != time.Second {
+					t.Errorf("dial_timeout = %v, want 1s", got)
+				}
+				if got := time.Duration(cfg.Server.WriteTimeout); got != 60*time.Second {
+					t.Errorf("write_timeout = %v, want the 60s default", got)
+				}
+			},
+		},
+		{
+			name: "negative timeout rejected",
+			yaml: `
+server:
+  write_timeout: -5s
+routes:
+  - prefix: /
+    upstream: http://localhost:9000
+    limit: {algorithm: token_bucket, rate: 1, burst: 1}
+`,
+			wantErr: "server.write_timeout must not be negative",
+		},
+		{
 			name:    "empty document",
 			yaml:    "",
 			wantErr: "empty document",

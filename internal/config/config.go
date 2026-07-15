@@ -31,14 +31,28 @@ const (
 
 // Config is the root of the gateway configuration.
 type Config struct {
-	Server  Server  `yaml:"server"`
-	Limiter Limiter `yaml:"limiter"`
-	Routes  []Route `yaml:"routes"`
+	Server   Server   `yaml:"server"`
+	Upstream Upstream `yaml:"upstream"`
+	Limiter  Limiter  `yaml:"limiter"`
+	Routes   []Route  `yaml:"routes"`
 }
 
-// Server holds HTTP server settings.
+// Server holds HTTP server settings. Zero timeouts are replaced with the
+// defaults noted below; timeouts cannot be disabled in M1.
 type Server struct {
-	Listen string `yaml:"listen"`
+	Listen            string   `yaml:"listen"`
+	ReadHeaderTimeout Duration `yaml:"read_header_timeout"` // default 5s
+	ReadTimeout       Duration `yaml:"read_timeout"`        // default 30s
+	WriteTimeout      Duration `yaml:"write_timeout"`       // default 60s; also caps proxied response time
+	IdleTimeout       Duration `yaml:"idle_timeout"`        // default 120s
+	ShutdownTimeout   Duration `yaml:"shutdown_timeout"`    // default 10s
+}
+
+// Upstream holds HTTP client settings for talking to upstreams; one
+// transport with these timeouts is shared across all routes.
+type Upstream struct {
+	DialTimeout           Duration `yaml:"dial_timeout"`            // default 5s
+	ResponseHeaderTimeout Duration `yaml:"response_header_timeout"` // default 10s
 }
 
 // Limiter selects where rate-limit state lives.
@@ -165,6 +179,13 @@ func (c *Config) applyDefaults() {
 	if c.Server.Listen == "" {
 		c.Server.Listen = ":8080"
 	}
+	defaultDuration(&c.Server.ReadHeaderTimeout, 5*time.Second)
+	defaultDuration(&c.Server.ReadTimeout, 30*time.Second)
+	defaultDuration(&c.Server.WriteTimeout, 60*time.Second)
+	defaultDuration(&c.Server.IdleTimeout, 120*time.Second)
+	defaultDuration(&c.Server.ShutdownTimeout, 10*time.Second)
+	defaultDuration(&c.Upstream.DialTimeout, 5*time.Second)
+	defaultDuration(&c.Upstream.ResponseHeaderTimeout, 10*time.Second)
 	if c.Limiter.Backend == "" {
 		c.Limiter.Backend = BackendMemory
 	}
@@ -173,7 +194,29 @@ func (c *Config) applyDefaults() {
 	}
 }
 
+func defaultDuration(d *Duration, def time.Duration) {
+	if *d == 0 {
+		*d = Duration(def)
+	}
+}
+
 func (c *Config) validate() error {
+	for _, tt := range []struct {
+		name string
+		d    Duration
+	}{
+		{"server.read_header_timeout", c.Server.ReadHeaderTimeout},
+		{"server.read_timeout", c.Server.ReadTimeout},
+		{"server.write_timeout", c.Server.WriteTimeout},
+		{"server.idle_timeout", c.Server.IdleTimeout},
+		{"server.shutdown_timeout", c.Server.ShutdownTimeout},
+		{"upstream.dial_timeout", c.Upstream.DialTimeout},
+		{"upstream.response_header_timeout", c.Upstream.ResponseHeaderTimeout},
+	} {
+		if tt.d < 0 {
+			return fmt.Errorf("%s must not be negative, got %v", tt.name, time.Duration(tt.d))
+		}
+	}
 	switch c.Limiter.Backend {
 	case BackendMemory:
 	case BackendRedis:

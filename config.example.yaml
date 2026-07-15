@@ -1,5 +1,18 @@
 server:
   listen: ":8080"
+  # Optional timeouts (defaults shown). write_timeout also caps how long a
+  # proxied response may take.
+  # read_header_timeout: 5s
+  # read_timeout: 30s
+  # write_timeout: 60s
+  # idle_timeout: 120s
+  # shutdown_timeout: 10s
+
+# Optional HTTP client settings for talking to upstreams (defaults shown);
+# one transport with these timeouts is shared across all routes.
+# upstream:
+#   dial_timeout: 5s
+#   response_header_timeout: 10s
 
 limiter:
   backend: memory # memory | redis (redis lands in M3)
