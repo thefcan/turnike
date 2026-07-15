@@ -11,7 +11,7 @@ update it before session end. Milestone definitions live in the build plan
       bench-report skills)
 - [x] M0 — Skeleton: module layout, YAML config + tests, Makefile,
       golangci-lint, CI (lint + test -race), docker-compose.dev.yml, mock upstream
-- [ ] M1 — Reverse proxy core: ReverseProxy + route table, X-API-Key identity,
+- [x] M1 — Reverse proxy core: ReverseProxy + route table, X-API-Key identity,
       /healthz /readyz, slog request-ID logging, graceful shutdown, timeouts
 - [ ] M2 — Algorithms in-memory: fixed window, token bucket, sliding window log;
       Limiter interface; 429 + Retry-After + X-RateLimit-* headers
@@ -25,18 +25,25 @@ update it before session end. Milestone definitions live in the build plan
 
 ## Next action
 
-Start **M1** (reverse proxy core): httputil.ReverseProxy with the route
-table from internal/config (longest prefix wins — already decided and
-documented), client identity = X-API-Key with client-IP fallback, /healthz +
-/readyz, request-ID structured logging (slog), graceful shutdown, timeouts
-everywhere (server Read/Write/Idle + per-upstream). Tests: routing, unknown
-route → 404, header passthrough, dead upstream → 502. Replace the 501 stub
-handler in cmd/gateway/main.go.
+Start **M2** (algorithms in-memory): fixed window, token bucket, sliding
+window log behind a `Limiter` interface in internal/limiter. Pure,
+clock-injected logic (deterministic tests — project rule). On deny: 429 +
+`Retry-After` + `X-RateLimit-Limit/Remaining/Reset` headers, wired into the
+gateway between identity extraction and proxying (`Identity.Value` is the
+raw key for `Route.LimitFor`; `Identity.String()` is the fingerprinted
+limiter/log key).
 
-Advisor note carried into M1: decide **segment-boundary prefix matching**
-(`/api` matches `/api` and `/api/...`, not `/apiv2`) when the route table
-lands, and document it on the Route type — the uniqueness check already
-treats `/api` == `/api/`.
+Advisor backlog carried out of M1 (fix in M1.x/M2 as they become relevant):
+- Client-gone requests are logged as 200 — log ctx error or use the 499
+  convention.
+- README should state the "turnike runs at the edge" assumption behind
+  not trusting XFF; consider a `trusted_proxies` knob later.
+- Graceful-shutdown test doesn't prove draining (only that run() returns
+  nil after cancel).
+- 502 path only tested via dial failure; add a response-header-timeout
+  test.
+- /healthz//readyz answer every HTTP method; readyz checks have no
+  per-check timeout (resolve before M3's Redis ping).
 
 ## Decisions
 
@@ -56,6 +63,23 @@ treats `/api` == `/api/`.
   duplicates.
 - Toolchain pinned to **Go 1.26** across go.mod, CI and Dockerfile so the
   race-tested toolchain is the shipped one.
+- Routing (M1, advisor-reviewed): **segment-boundary** longest-prefix —
+  `/api` matches `/api` and `/api/...`, never `/apiv2`; `/api/v1` never
+  captures `/api/v1beta/x`. Matching runs on the cleaned escaped path;
+  the URL is forwarded unchanged (no prefix stripping). Paths with dot
+  segments (plain or percent-encoded) are rejected with 404 so the
+  matched route and the upstream's resolved path cannot diverge.
+  Documented on config.Route.
+- Identity (M1): `X-API-Key` else client IP; XFF not trusted. Log/Redis
+  form is `key:<sha256[:8] fingerprint>` / `ip:<addr>` — the raw key
+  never appears in logs and is used only for KeyOverrides lookups.
+- `/healthz` and `/readyz` are reserved paths served ahead of the route
+  table, outside the access log; readiness takes pluggable checks (M3
+  adds the Redis ping).
+- Timeout defaults (M1): server read-header 5s / read 30s / write 60s /
+  idle 120s / shutdown 10s; upstream dial 5s / response-header 10s. One
+  shared transport (connection pool) across routes. Host header is
+  rewritten to the upstream host (original in X-Forwarded-Host).
 
 ### Open (waiting on user)
 - M7 deploy (Fly.io + managed Redis): do it at all? Accounts/cost are the
@@ -73,3 +97,12 @@ treats `/api` == `/api/`.
   round 1 → FIX FIRST (8 findings), all fixed (limit semantics rework,
   multi-doc YAML rejection, prefix-collision check, Go version alignment,
   non-root Docker USER, CI tidy gate, README claim reword).
+- **2026-07-15** — Session 2: M1 shipped in 8 commits (config timeouts,
+  route table, identity, middleware, gateway, wiring, advisor fixes,
+  docs). E2E-verified against the mock upstream: routing + passthrough +
+  X-Forwarded-*, /apiv2 → 404, dead upstream → 502 with request-ID
+  correlated error log, SIGTERM drain + clean exit, traversal (plain and
+  %2e%2e) → 404, fingerprinted key in access log. Advisor review round 1
+  → FIX FIRST (10 findings): 1–3 + 6 + 8 fixed (dot-segment rejection,
+  deferred access log, key fingerprinting, request-ID charset, honest
+  recorder test); 4/5/7/9/10 carried as backlog under "Next action".
