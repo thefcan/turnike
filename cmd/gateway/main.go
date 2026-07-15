@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/thefcan/turnike/internal/config"
+	"github.com/thefcan/turnike/internal/limiter"
 	"github.com/thefcan/turnike/internal/proxy"
 )
 
@@ -45,7 +46,11 @@ func main() {
 // run serves the gateway until it fails or ctx is canceled, then drains
 // in-flight requests for at most the configured shutdown timeout.
 func run(ctx context.Context, cfg *config.Config, logger *slog.Logger) error {
-	handler, err := proxy.NewHandler(cfg, logger) // M1: no ready checks yet
+	lim, err := limiter.New(cfg.Limiter, limiter.RealClock{})
+	if err != nil {
+		return err
+	}
+	handler, err := proxy.NewHandler(cfg, logger, lim) // no ready checks until M3's Redis ping
 	if err != nil {
 		return err
 	}

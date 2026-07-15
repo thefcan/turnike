@@ -6,6 +6,7 @@ import (
 	"net/http"
 
 	"github.com/thefcan/turnike/internal/config"
+	"github.com/thefcan/turnike/internal/limiter"
 )
 
 // ReadyCheck reports whether a dependency is ready to serve traffic; a
@@ -14,15 +15,19 @@ import (
 type ReadyCheck func(context.Context) error
 
 // NewHandler wires the health endpoints, the request-ID/access-log
-// middleware and the gateway into the root handler. /healthz and /readyz
-// are reserved: they take precedence over configured routes and bypass
-// the middleware.
+// middleware and the gateway (with the given Limiter) into the root
+// handler. /healthz and /readyz are reserved: they take precedence over
+// configured routes and bypass the middleware.
+//
+// lim is injected rather than built from cfg here so tests can drive a
+// MemoryLimiter on a manual clock; cmd/gateway/main.go builds the
+// production one via limiter.New(cfg.Limiter, limiter.RealClock{}).
 //
 // The dispatch is deliberately not an http.ServeMux — the mux
 // 301-redirects uncleaned paths, which would break POSTs through the
 // gateway; path cleaning belongs to the route table alone.
-func NewHandler(cfg *config.Config, logger *slog.Logger, ready ...ReadyCheck) (http.Handler, error) {
-	gw, err := NewGateway(cfg.Routes, cfg.Upstream, logger)
+func NewHandler(cfg *config.Config, logger *slog.Logger, lim limiter.Limiter, ready ...ReadyCheck) (http.Handler, error) {
+	gw, err := NewGateway(cfg.Routes, cfg.Upstream, lim, logger)
 	if err != nil {
 		return nil, err
 	}

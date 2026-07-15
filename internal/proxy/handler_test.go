@@ -20,7 +20,7 @@ func newTestHandler(t *testing.T, logger *slog.Logger, upstream string, ready ..
 	cfg := &config.Config{
 		Routes: []config.Route{{Prefix: "/", Upstream: upstream}},
 	}
-	h, err := NewHandler(cfg, logger, ready...)
+	h, err := NewHandler(cfg, logger, allowAllLimiter{}, ready...)
 	if err != nil {
 		t.Fatalf("NewHandler: %v", err)
 	}

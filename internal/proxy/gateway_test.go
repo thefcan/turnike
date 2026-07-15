@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"context"
 	"encoding/json"
 	"io"
 	"log/slog"
@@ -9,9 +10,22 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/thefcan/turnike/internal/config"
+	"github.com/thefcan/turnike/internal/limiter"
 )
+
+// allowAllLimiter is a Limiter test double for tests that exercise
+// routing/proxying and don't care about rate limiting: it never denies,
+// so those tests stay decoupled from the algorithms' behavior. Tests
+// that do care build a real *limiter.MemoryLimiter directly (see
+// ratelimit_test.go).
+type allowAllLimiter struct{}
+
+func (allowAllLimiter) Allow(context.Context, string, config.Limit) (limiter.Decision, error) {
+	return limiter.Decision{Allowed: true, Limit: 1, Remaining: 1, Reset: time.Now().Add(time.Hour)}, nil
+}
 
 // echoUpstream mirrors mock/main.go: it reports what it received so
 // routing and header passthrough are observable from the test.
@@ -40,7 +54,7 @@ func echoUpstream(t *testing.T, marker string) *httptest.Server {
 
 func newTestGateway(t *testing.T, routes []config.Route) *Gateway {
 	t.Helper()
-	g, err := NewGateway(routes, config.Upstream{}, slog.New(slog.DiscardHandler))
+	g, err := NewGateway(routes, config.Upstream{}, allowAllLimiter{}, slog.New(slog.DiscardHandler))
 	if err != nil {
 		t.Fatalf("NewGateway: %v", err)
 	}
