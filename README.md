@@ -1,9 +1,9 @@
 # turnike
 
 **turnike** — a turnstile for your APIs. A distributed rate limiter & API
-gateway in Go, built in public. On the roadmap: hand-implemented token bucket,
-sliding window and fixed window algorithms, atomic shared state via Redis+Lua,
-and burst-load benchmarks against a multi-replica setup.
+gateway in Go, built in public. Hand-implemented token bucket, sliding window
+and fixed window algorithms with atomic shared state via Redis+Lua; on the
+roadmap: burst-load benchmarks against a multi-replica setup.
 
 > 🚧 Work in progress. The full design-doc README (problem statement,
 > architecture, measured trade-offs, multi-instance bypass demo) lands with
@@ -32,9 +32,10 @@ Every route carries a [`Limit`](config.example.yaml): **fixed_window**,
 **sliding_window** (a timestamp log — exact, never over-admits across a
 window boundary the way fixed_window's fixed grid can) or **token_bucket**
 (a continuous refill up to a burst capacity). `key_overrides` swaps in a
-different limit for specific API keys. All three run in memory today,
-behind a `Limiter` interface designed to move state into Redis (M3)
-without changing the request path.
+different limit for specific API keys. All three run behind one `Limiter`
+interface with two backends — **memory** (per-instance state) and
+**redis** (state shared by every instance, see below) — and the request
+path is identical either way.
 
 Every response for a matched route carries `X-RateLimit-Limit` /
 `X-RateLimit-Remaining` / `X-RateLimit-Reset` (rate for the window
@@ -55,8 +56,100 @@ The in-memory backend keeps one bucket per (route, identity), capped at
 100,000 distinct entries — identity isn't authenticated, so nothing but
 this cap stops a caller from growing it by varying `X-API-Key` per
 request. Past the cap, a brand-new identity fails open (proxied,
-unlimited) rather than being tracked. M3 replaces the map with TTL'd
-Redis keys, which age out on their own and remove the need for the cap.
+unlimited) rather than being tracked. The redis backend replaces the map
+with TTL'd keys, which age out on their own and remove the need for the
+cap.
+
+## Distributed rate limiting (Redis + Lua)
+
+With `limiter.backend: redis`, every gateway instance shares one set of
+counters: N replicas enforce one quota instead of N quotas that happen
+to share a config file. (The multi-replica bypass demo that motivates
+this lands in M4.)
+
+### Why not GET-then-SET
+
+A rate-limit decision is a read-check-write. Done as separate commands,
+two gateways interleave: at rate 10 with the count at 9, A reads 9, B
+reads 9, both conclude "under limit", both write — 11 admitted. Every
+non-atomic implementation has this window, and adding instances widens
+it. turnike runs the whole check-and-consume as **one Lua script per
+decision**: redis executes scripts serially, so the read, the verdict
+and the write are one atomic step — and one round trip. A hammer test
+drives 4 clients × 100 goroutines at one key and asserts *exactly*
+`rate` admissions, per algorithm.
+
+### One clock: redis TIME
+
+The scripts take time from `redis.call('TIME')`, in integer
+microseconds. No gateway clock participates in any decision, so
+instances need not agree on wall time — a drifting replica cannot
+stretch or shrink anyone's window. Redis 7 replicates scripts by
+effects, which is what makes writing after the non-deterministic TIME
+call legal. Two footnotes, both benign and both documented in the
+script headers: the fixed_window grid anchors at the Unix epoch (the
+in-memory backend anchors at Go's zero time — the backends never share
+state), and because TIME is gettimeofday, not monotonic, fixed_window
+keeps its stored window when TIME steps backward instead of handing out
+a fresh quota.
+
+### EVALSHA and restarts
+
+Scripts are addressed by SHA-1 (`EVALSHA`). Whenever the script cache is
+empty — first boot, a redis restart, a `SCRIPT FLUSH` — the client falls
+back to `EVAL`, which executes *and re-caches* the script, so limiting
+self-heals on the very next decision; an integration test flushes the
+cache mid-run and asserts exactly `rate` admissions across the flush.
+Boot additionally does a best-effort `SCRIPT LOAD`, surfacing Lua syntax
+errors immediately instead of on the first request.
+
+### Every key expires
+
+| algorithm | state | TTL |
+|---|---|---|
+| fixed_window | hash `{ws, count}` | window end |
+| token_bucket | hash `{tokens, last_us}` | time to refill to full (full ≡ fresh key) |
+| sliding_window | zset of accept times | one window |
+
+Identity is unauthenticated client input, so keys must age out on their
+own — the structural fix for what the in-memory backend's 100k cap
+patches. sliding_window also trims (`ZREMRANGEBYSCORE`) before every
+decision, and its members carry a per-call nonce: TIME has µs
+resolution, so two same-µs accepts are real and must not collapse into
+one zset entry.
+
+### When redis is down: `on_error`
+
+Every redis call runs through a small circuit breaker — 5 consecutive
+failures open it, one probe per 1s cooldown decides recovery — so an
+outage costs roughly one timed-out call per second per instance, not
+one per request. The `on_error` policy says what an unanswerable
+decision means:
+
+| `on_error` | requests | rate-limit headers | `/readyz` | over-admission while down |
+|---|---|---|---|---|
+| `fail_open` | proxied, unlimited | none | 200 | unbounded |
+| `fail_closed` | 503 + `Retry-After` | none | **503** | zero |
+| `degrade` (default) | limited per instance, in memory | real, instance-local | 200 | ≤ instances × limit |
+
+`degrade` falls back to the same in-memory limiter the memory backend
+uses, so the upstream stays approximately protected *and* available;
+recovery can double-count briefly (bounded by one window) when redis
+state expired during the outage. `fail_closed` is for enforcement
+semantics (quotas, billing): nothing may slip through, at the price of
+turning a redis outage into a request outage. It is also the only
+policy whose redis ping gates `/readyz` — under the other two the
+instance is still doing useful work, and redis is a *shared*
+dependency: readiness-failing every instance at once would drain the
+whole pool and manufacture the very outage those policies were chosen
+to survive. One accepted edge: under fail_closed a fresh PONG can
+advertise an instance up to one cooldown before the breaker's next
+probe closes the circuit.
+
+Scope note: single-node redis (one `addr`); the sliding-window script
+would need hash-tagged keys under redis cluster. Performance numbers —
+latency, throughput, the multi-replica bypass — wait for M4/M6's
+measured runs.
 
 ## License
 
