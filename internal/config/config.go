@@ -29,6 +29,14 @@ const (
 	BackendRedis  = "redis"
 )
 
+// Supported redis failure policies: what the gateway does with a request
+// when the redis backend cannot answer (call failed or circuit open).
+const (
+	OnErrorFailOpen   = "fail_open"   // proxy the request without limiting
+	OnErrorFailClosed = "fail_closed" // reject the request with 503
+	OnErrorDegrade    = "degrade"     // fall back to per-instance in-memory limiting
+)
+
 // Config is the root of the gateway configuration.
 type Config struct {
 	Server   Server   `yaml:"server"`
@@ -64,6 +72,10 @@ type Limiter struct {
 // Redis holds connection settings for the redis backend.
 type Redis struct {
 	Addr string `yaml:"addr"`
+	// OnError is the failure policy applied when redis cannot answer:
+	// one of fail_open, fail_closed or degrade (the default). See the
+	// OnError* constants.
+	OnError string `yaml:"on_error"`
 }
 
 // Route maps a path prefix to an upstream and its rate-limit policy.
@@ -198,6 +210,9 @@ func (c *Config) applyDefaults() {
 	if c.Limiter.Backend == "" {
 		c.Limiter.Backend = BackendMemory
 	}
+	if c.Limiter.Redis.OnError == "" {
+		c.Limiter.Redis.OnError = OnErrorDegrade
+	}
 	for i := range c.Routes {
 		c.Routes[i].Limit = c.Routes[i].Limit.withDefaults()
 	}
@@ -235,6 +250,14 @@ func (c *Config) validate() error {
 	default:
 		return fmt.Errorf("limiter: unknown backend %q (want %q or %q)",
 			c.Limiter.Backend, BackendMemory, BackendRedis)
+	}
+	// Validated regardless of backend so a typo dies at parse time, not
+	// on the day the backend is switched to redis.
+	switch c.Limiter.Redis.OnError {
+	case OnErrorFailOpen, OnErrorFailClosed, OnErrorDegrade:
+	default:
+		return fmt.Errorf("limiter: redis.on_error must be %q, %q or %q, got %q",
+			OnErrorFailOpen, OnErrorFailClosed, OnErrorDegrade, c.Limiter.Redis.OnError)
 	}
 	if len(c.Routes) == 0 {
 		return errors.New("routes: at least one route is required")

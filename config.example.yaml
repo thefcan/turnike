@@ -15,9 +15,15 @@ server:
 #   response_header_timeout: 10s
 
 limiter:
-  backend: memory # memory | redis (redis lands in M3)
+  backend: memory # memory | redis
   # redis:
   #   addr: localhost:6379
+  #   # What to do with a request when redis cannot answer (call failed
+  #   # or circuit open):
+  #   #   fail_open   - proxy it without limiting
+  #   #   fail_closed - reject it with 503 + Retry-After
+  #   #   degrade     - fall back to per-instance in-memory limits (default)
+  #   on_error: degrade
 
 # Routing: segment-boundary longest-prefix. A prefix matches whole path
 # segments only ("/api" matches "/api" and "/api/users", not "/apiv2";

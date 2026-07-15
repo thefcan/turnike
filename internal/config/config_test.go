@@ -314,7 +314,43 @@ routes:
 				if cfg.Limiter.Redis.Addr != "localhost:6379" {
 					t.Errorf("redis addr = %q", cfg.Limiter.Redis.Addr)
 				}
+				if cfg.Limiter.Redis.OnError != OnErrorDegrade {
+					t.Errorf("on_error = %q, want the %q default", cfg.Limiter.Redis.OnError, OnErrorDegrade)
+				}
 			},
+		},
+		{
+			name: "redis on_error parsed",
+			yaml: `
+limiter:
+  backend: redis
+  redis: {addr: "localhost:6379", on_error: fail_closed}
+routes:
+  - prefix: /
+    upstream: http://localhost:9000
+    limit: {algorithm: token_bucket, rate: 1, burst: 1}
+`,
+			check: func(t *testing.T, cfg *Config) {
+				t.Helper()
+				if cfg.Limiter.Redis.OnError != OnErrorFailClosed {
+					t.Errorf("on_error = %q, want %q", cfg.Limiter.Redis.OnError, OnErrorFailClosed)
+				}
+			},
+		},
+		{
+			// The policy is validated under every backend so the typo is
+			// caught now, not on the day backend is flipped to redis.
+			name: "invalid on_error rejected even under memory backend",
+			yaml: `
+limiter:
+  backend: memory
+  redis: {on_error: fail_openn}
+routes:
+  - prefix: /
+    upstream: http://localhost:9000
+    limit: {algorithm: token_bucket, rate: 1, burst: 1}
+`,
+			wantErr: `redis.on_error must be "fail_open", "fail_closed" or "degrade"`,
 		},
 		{
 			name: "unknown backend",
