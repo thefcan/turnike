@@ -1,6 +1,6 @@
 BIN_DIR := bin
 
-.PHONY: build test test-integration lint run tidy
+.PHONY: build test test-integration lint run tidy demo
 
 build:
 	go build -o $(BIN_DIR)/gateway ./cmd/gateway
@@ -24,3 +24,8 @@ run: build
 
 tidy:
 	go mod tidy
+
+# Runs the M4 multi-instance bypass demo end to end: builds the demo
+# images, drives both arms through nginx, writes bench/demo_bypass_*.txt.
+demo:
+	./scripts/demo_bypass.sh
