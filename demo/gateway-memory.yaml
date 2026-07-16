@@ -1,0 +1,20 @@
+# Bypass arm: per-instance in-memory counters. Identical to
+# gateway-redis.yaml except the limiter block — that one-block diff is
+# the demo: same topology, same identity, 3x the quota admitted.
+#
+# window: 1h so a demo arm can never straddle a window boundary (the
+# script additionally waits out the top of the hour); 1h is in the set
+# where the redis epoch grid and the memory Go-zero grid coincide.
+server:
+  listen: ":8080"
+
+limiter:
+  backend: memory
+
+routes:
+  - prefix: /demo/
+    upstream: http://mock:9000
+    limit:
+      algorithm: fixed_window
+      rate: 30
+      window: 1h

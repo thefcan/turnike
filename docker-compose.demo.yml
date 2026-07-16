@@ -1,0 +1,87 @@
+# M4 demo: nginx round-robin across 3 gateway replicas over ONE redis.
+#
+# DEMO_BACKEND (memory|redis, default redis) selects which demo/ config
+# every replica loads; scripts/demo_bypass.sh drives both arms and is
+# the intended entry point (`make demo`).
+#
+# The project name is distinct from the dev compose (which defaults to
+# the directory name, "turnike") so `down` here can never touch the
+# possibly-in-use dev redis/mock. Nothing but nginx publishes a host
+# port for the same reason: the dev compose owns 6379 and 9000.
+name: turnike-demo
+
+# Common replica block. Only gateway-1 carries `build:` — the shared
+# image tag makes the other two reuse the same build instead of racing
+# three identical ones.
+x-gateway: &gateway
+  image: turnike-gateway:demo
+  command: ["-config", "/etc/turnike/gateway-${DEMO_BACKEND:-redis}.yaml"]
+  volumes:
+    - ./demo:/etc/turnike:ro
+  depends_on:
+    redis:
+      condition: service_healthy
+    mock:
+      condition: service_healthy
+  # /readyz, not /healthz: the memory arm has no ready checks and goes
+  # 200 once listening, but the redis arm runs fail_closed, which is the
+  # one policy that puts the redis ping on /readyz — so `up --wait`
+  # returns only after every replica has verified real redis
+  # connectivity, before the script fires a single request.
+  healthcheck:
+    test: ["CMD", "wget", "-q", "-T", "2", "-O", "/dev/null", "http://127.0.0.1:8080/readyz"]
+    interval: 2s
+    timeout: 3s
+    retries: 15
+    start_period: 5s
+
+services:
+  redis:
+    image: redis:7-alpine
+    # No host port and no volume: only the replicas talk to it, and no
+    # limiter state may survive between demo arms.
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  mock:
+    build:
+      context: .
+      target: mock
+    image: turnike-mock:demo
+    command: ["-addr", ":9000"]
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-T", "2", "-O", "/dev/null", "http://127.0.0.1:9000/"]
+      interval: 2s
+      timeout: 3s
+      retries: 15
+      start_period: 5s
+
+  gateway-1:
+    <<: *gateway
+    build:
+      context: .
+      target: gateway
+
+  gateway-2: *gateway
+
+  gateway-3: *gateway
+
+  nginx:
+    image: nginx:1.27-alpine
+    volumes:
+      - ./demo/nginx.conf:/etc/nginx/nginx.conf:ro
+    ports:
+      - "8090:8080" # the demo's only published port
+    depends_on:
+      gateway-1:
+        condition: service_healthy
+      gateway-2:
+        condition: service_healthy
+      gateway-3:
+        condition: service_healthy
+    # Deliberately no healthcheck: a check routed through nginx would
+    # consume round-robin picks during the measured run. The script's
+    # warmup loop covers the "running but not yet accepting" race.

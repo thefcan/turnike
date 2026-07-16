@@ -1,0 +1,28 @@
+# Fix arm: counters shared by every replica through one redis.
+#
+# on_error: fail_closed on purpose, even though degrade is the
+# recommended production default. Under degrade an unreachable redis
+# silently falls back to per-instance memory counting — which would
+# fake the very bypass this demo exists to disprove. fail_closed makes
+# redis failure loud (503s abort the script instead of polluting the
+# numbers), and it is the one policy that registers the redis ping on
+# /readyz, so the compose healthcheck + `up --wait` prove real
+# connectivity before any measured request fires. It changes only
+# failure behavior: the admitted-exactly-30 result does not depend on
+# it.
+server:
+  listen: ":8080"
+
+limiter:
+  backend: redis
+  redis:
+    addr: redis:6379
+    on_error: fail_closed
+
+routes:
+  - prefix: /demo/
+    upstream: http://mock:9000
+    limit:
+      algorithm: fixed_window
+      rate: 30
+      window: 1h
