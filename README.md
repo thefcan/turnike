@@ -6,8 +6,8 @@ and fixed window algorithms with atomic shared state via Redis+Lua; on the
 roadmap: burst-load benchmarks against a multi-replica setup.
 
 > 🚧 Work in progress. The full design-doc README (problem statement,
-> architecture, measured trade-offs, multi-instance bypass demo) lands with
-> milestone M6 — see [PROGRESS.md](PROGRESS.md) for current status.
+> architecture, measured trade-offs) lands with milestone M6 — see
+> [PROGRESS.md](PROGRESS.md) for current status.
 
 ## Routing
 
@@ -64,8 +64,39 @@ cap.
 
 With `limiter.backend: redis`, every gateway instance shares one set of
 counters: N replicas enforce one quota instead of N quotas that happen
-to share a config file. (The multi-replica bypass demo that motivates
-this lands in M4.)
+to share a config file.
+
+### The bypass, measured
+
+`make demo` (or `./scripts/demo_bypass.sh`) stands up nginx
+round-robining 3 gateway replicas over one redis and drives 150
+sequential requests with a single identity at a route limited to
+`fixed_window rate=30 window=1h`. The identity travels as `X-API-Key` —
+behind a load balancer every client collapses to the LB's address, so
+the key header is what keeps identities apart. Same topology twice; the
+only difference between the runs is the gateway config's `limiter`
+block:
+
+| `limiter.backend` | quota | requests | admitted (200) | denied (429) |
+|---|---:|---:|---:|---:|
+| `memory` | 30 | 150 | **90** | 60 |
+| `redis` | 30 | 150 | **30** | 120 |
+
+With per-instance memory the mechanism admits up to replicas × rate; the
+measured run hit that bound exactly — round-robin split the requests
+50/50/50 and each replica granted its own 30, visible in the raw output
+as `x-ratelimit-remaining` counting down in three interleaved sequences
+(29, 29, 29, 28, 28, 28, …). With redis, request 30 was the last one
+through (`remaining=0`) and request 31 got 429. Raw outputs:
+[`bench/demo_bypass_memory.txt`](bench/demo_bypass_memory.txt),
+[`bench/demo_bypass_redis.txt`](bench/demo_bypass_redis.txt); tables and
+notes in [`bench/REPORT.md`](bench/REPORT.md).
+
+The demo's redis config pins `on_error: fail_closed` rather than the
+`degrade` default: under degrade an unreachable redis silently falls
+back to per-instance counting — faking the very bypass the demo exists
+to disprove. The policy changes failure behavior only; the
+exactly-the-quota result does not depend on it.
 
 ### Why not GET-then-SET
 
@@ -148,9 +179,9 @@ advertise an instance up to one cooldown before the breaker's next
 probe closes the circuit.
 
 Scope note: single-node redis (one `addr`); the sliding-window script
-would need hash-tagged keys under redis cluster. Performance numbers —
-latency, throughput, the multi-replica bypass — wait for M4/M6's
-measured runs.
+would need hash-tagged keys under redis cluster. The multi-replica
+bypass is measured (see [`bench/REPORT.md`](bench/REPORT.md)); latency
+and throughput numbers wait for M6's load runs.
 
 ## License
 
