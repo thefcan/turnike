@@ -8,6 +8,7 @@ import (
 
 	"github.com/thefcan/turnike/internal/config"
 	"github.com/thefcan/turnike/internal/limiter"
+	"github.com/thefcan/turnike/internal/metrics"
 )
 
 // ReadyCheck reports whether a dependency is ready to serve traffic; a
@@ -34,7 +35,7 @@ const readyCheckTimeout = time.Second
 // The dispatch is deliberately not an http.ServeMux — the mux
 // 301-redirects uncleaned paths, which would break POSTs through the
 // gateway; path cleaning belongs to the route table alone.
-func NewHandler(cfg *config.Config, logger *slog.Logger, lim limiter.Limiter, ready ...ReadyCheck) (http.Handler, error) {
+func NewHandler(cfg *config.Config, logger *slog.Logger, lim limiter.Limiter, m *metrics.Metrics, ready ...ReadyCheck) (http.Handler, error) {
 	// The on_error policy governs *redis* failures only. Under the
 	// memory backend the sole runtime error is the at-capacity guard,
 	// which fails open by design - a leftover redis.on_error line in a
@@ -43,11 +44,11 @@ func NewHandler(cfg *config.Config, logger *slog.Logger, lim limiter.Limiter, re
 	if cfg.Limiter.Backend == config.BackendRedis {
 		onError = cfg.Limiter.Redis.OnError
 	}
-	gw, err := NewGateway(cfg.Routes, cfg.Upstream, lim, onError, logger)
+	gw, err := NewGateway(cfg.Routes, cfg.Upstream, lim, onError, logger, m)
 	if err != nil {
 		return nil, err
 	}
-	proxied := Middleware(logger)(gw)
+	proxied := Middleware(logger, m)(gw)
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/healthz", "/readyz":

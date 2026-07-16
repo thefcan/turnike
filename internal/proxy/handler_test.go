@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/thefcan/turnike/internal/config"
+	"github.com/thefcan/turnike/internal/metrics"
 )
 
 func newTestHandler(t *testing.T, logger *slog.Logger, upstream string, ready ...ReadyCheck) http.Handler {
@@ -21,7 +22,7 @@ func newTestHandler(t *testing.T, logger *slog.Logger, upstream string, ready ..
 	cfg := &config.Config{
 		Routes: []config.Route{{Prefix: "/", Upstream: upstream}},
 	}
-	h, err := NewHandler(cfg, logger, allowAllLimiter{}, ready...)
+	h, err := NewHandler(cfg, logger, allowAllLimiter{}, metrics.New(), ready...)
 	if err != nil {
 		t.Fatalf("NewHandler: %v", err)
 	}
@@ -88,7 +89,7 @@ func TestHandlerMemoryBackendIgnoresOnError(t *testing.T) {
 		},
 		Routes: []config.Route{{Prefix: "/", Upstream: up.URL}},
 	}
-	h, err := NewHandler(cfg, slog.New(slog.DiscardHandler), erroringLimiter{})
+	h, err := NewHandler(cfg, slog.New(slog.DiscardHandler), erroringLimiter{}, metrics.New())
 	if err != nil {
 		t.Fatalf("NewHandler: %v", err)
 	}

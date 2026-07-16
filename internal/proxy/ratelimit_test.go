@@ -10,6 +10,7 @@ import (
 
 	"github.com/thefcan/turnike/internal/config"
 	"github.com/thefcan/turnike/internal/limiter"
+	"github.com/thefcan/turnike/internal/metrics"
 )
 
 // manualClock is a limiter.Clock double so these integration tests can
@@ -22,7 +23,7 @@ func (c *manualClock) Advance(d time.Duration) { c.t = c.t.Add(d) }
 
 func newRateLimitedGateway(t *testing.T, routes []config.Route, clock *manualClock) (*Gateway, *httptest.Server) {
 	t.Helper()
-	g, err := NewGateway(routes, config.Upstream{}, limiter.NewMemoryLimiter(clock), config.OnErrorFailOpen, slog.New(slog.DiscardHandler))
+	g, err := NewGateway(routes, config.Upstream{}, limiter.NewMemoryLimiter(clock), config.OnErrorFailOpen, slog.New(slog.DiscardHandler), metrics.New())
 	if err != nil {
 		t.Fatalf("NewGateway: %v", err)
 	}

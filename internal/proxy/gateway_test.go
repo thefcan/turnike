@@ -13,8 +13,11 @@ import (
 	"testing"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus/testutil"
+
 	"github.com/thefcan/turnike/internal/config"
 	"github.com/thefcan/turnike/internal/limiter"
+	"github.com/thefcan/turnike/internal/metrics"
 )
 
 // allowAllLimiter is a Limiter test double for tests that exercise
@@ -63,7 +66,7 @@ func echoUpstream(t *testing.T, marker string) *httptest.Server {
 
 func newTestGateway(t *testing.T, routes []config.Route) *Gateway {
 	t.Helper()
-	g, err := NewGateway(routes, config.Upstream{}, allowAllLimiter{}, config.OnErrorFailOpen, slog.New(slog.DiscardHandler))
+	g, err := NewGateway(routes, config.Upstream{}, allowAllLimiter{}, config.OnErrorFailOpen, slog.New(slog.DiscardHandler), metrics.New())
 	if err != nil {
 		t.Fatalf("NewGateway: %v", err)
 	}
@@ -194,7 +197,7 @@ func TestGatewayResponseHeaderTimeoutIs502(t *testing.T) {
 	g, err := NewGateway(
 		[]config.Route{{Prefix: "/api/", Upstream: slow.URL}},
 		config.Upstream{ResponseHeaderTimeout: config.Duration(10 * time.Millisecond)},
-		allowAllLimiter{}, config.OnErrorFailOpen, slog.New(slog.DiscardHandler))
+		allowAllLimiter{}, config.OnErrorFailOpen, slog.New(slog.DiscardHandler), metrics.New())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -218,8 +221,9 @@ func TestGatewayFailsOpenOnLimiterError(t *testing.T) {
 	// (there's no Decision to report). The redis backend produces this
 	// error for real when redis is down and the policy isn't degrade.
 	up := echoUpstream(t, "api")
+	m := metrics.New()
 	g, err := NewGateway([]config.Route{{Prefix: "/api/", Upstream: up.URL}},
-		config.Upstream{}, erroringLimiter{}, config.OnErrorFailOpen, slog.New(slog.DiscardHandler))
+		config.Upstream{}, erroringLimiter{}, config.OnErrorFailOpen, slog.New(slog.DiscardHandler), m)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -234,6 +238,10 @@ func TestGatewayFailsOpenOnLimiterError(t *testing.T) {
 	if got := w.Header().Get("X-RateLimit-Limit"); got != "" {
 		t.Errorf("X-RateLimit-Limit = %q, want absent — no Decision was returned to report", got)
 	}
+	// No verdict existed, so the pass-through counts as bare degrade.
+	if got := testutil.ToFloat64(m.RequestsTotal.WithLabelValues("/api/", metrics.DecisionDegrade)); got != 1 {
+		t.Errorf("degrade count = %v, want 1 for the fail-open pass-through", got)
+	}
 }
 
 func TestGatewayFailsClosedOnLimiterError(t *testing.T) {
@@ -246,8 +254,9 @@ func TestGatewayFailsClosedOnLimiterError(t *testing.T) {
 	}))
 	t.Cleanup(up.Close)
 
+	m := metrics.New()
 	g, err := NewGateway([]config.Route{{Prefix: "/api/", Upstream: up.URL}},
-		config.Upstream{}, erroringLimiter{}, config.OnErrorFailClosed, slog.New(slog.DiscardHandler))
+		config.Upstream{}, erroringLimiter{}, config.OnErrorFailClosed, slog.New(slog.DiscardHandler), m)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -258,6 +267,14 @@ func TestGatewayFailsClosedOnLimiterError(t *testing.T) {
 
 	if w.Code != http.StatusServiceUnavailable {
 		t.Errorf("status = %d, want 503", w.Code)
+	}
+	// The 503 is the failure policy's answer, not a quota verdict: it
+	// counts as bare degrade, not deny.
+	if got := testutil.ToFloat64(m.RequestsTotal.WithLabelValues("/api/", metrics.DecisionDegrade)); got != 1 {
+		t.Errorf("degrade count = %v, want 1 for the fail-closed 503", got)
+	}
+	if got := testutil.ToFloat64(m.RequestsTotal.WithLabelValues("/api/", metrics.DecisionDeny)); got != 0 {
+		t.Errorf("deny count = %v, want 0 - a 503 is not a rate-limit deny", got)
 	}
 	if got := w.Header().Get("Retry-After"); got != "1" {
 		t.Errorf("Retry-After = %q, want %q (the breaker cooldown, ceil'd)", got, "1")

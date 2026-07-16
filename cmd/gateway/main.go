@@ -96,7 +96,7 @@ func serve(ctx context.Context, cfg *config.Config, ln net.Listener, logger *slo
 			ready = append(ready, rl.Ping)
 		}
 	}
-	handler, err := proxy.NewHandler(cfg, logger, lim, ready...)
+	handler, err := proxy.NewHandler(cfg, logger, lim, m, ready...)
 	if err != nil {
 		return err
 	}

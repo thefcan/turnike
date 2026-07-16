@@ -9,6 +9,8 @@ import (
 	"regexp"
 	"strings"
 	"testing"
+
+	"github.com/thefcan/turnike/internal/metrics"
 )
 
 var hexID = regexp.MustCompile(`^[0-9a-f]{32}$`)
@@ -27,7 +29,7 @@ func TestMiddlewareRequestID(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			var seenByHandler, seenInCtx string
-			h := Middleware(slog.New(slog.DiscardHandler))(
+			h := Middleware(slog.New(slog.DiscardHandler), metrics.New())(
 				http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
 					seenByHandler = r.Header.Get(HeaderRequestID)
 					seenInCtx = RequestIDFrom(r.Context())
@@ -61,7 +63,7 @@ func TestMiddlewareRequestID(t *testing.T) {
 func TestMiddlewareAccessLog(t *testing.T) {
 	var buf bytes.Buffer
 	logger := slog.New(slog.NewJSONHandler(&buf, nil))
-	h := Middleware(logger)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	h := Middleware(logger, metrics.New())(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		setRoutePrefix(r.Context(), "/api/")
 		w.WriteHeader(http.StatusTeapot)
 		_, _ = w.Write([]byte("hello"))
@@ -111,7 +113,7 @@ func TestMiddlewareAccessLog(t *testing.T) {
 
 func TestMiddlewareImplicitStatusAndUnwrap(t *testing.T) {
 	var buf bytes.Buffer
-	h := Middleware(slog.New(slog.NewJSONHandler(&buf, nil)))(
+	h := Middleware(slog.New(slog.NewJSONHandler(&buf, nil)), metrics.New())(
 		http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 			// No WriteHeader: the recorder must log the implicit 200, and
 			// Flush must reach the real writer through Unwrap.
@@ -139,7 +141,7 @@ func TestMiddlewareImplicitStatusAndUnwrap(t *testing.T) {
 
 func TestMiddlewareLogsAbortedRequests(t *testing.T) {
 	var buf bytes.Buffer
-	h := Middleware(slog.New(slog.NewJSONHandler(&buf, nil)))(
+	h := Middleware(slog.New(slog.NewJSONHandler(&buf, nil)), metrics.New())(
 		http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
 			// ReverseProxy aborts like this when the upstream body copy
 			// fails mid-response.

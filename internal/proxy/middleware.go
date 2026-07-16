@@ -8,6 +8,8 @@ import (
 	"net/http"
 	"regexp"
 	"time"
+
+	"github.com/thefcan/turnike/internal/metrics"
 )
 
 // HeaderRequestID is the header carrying the request ID; an inbound value
@@ -24,11 +26,11 @@ const (
 	routePrefixKey
 )
 
-// Middleware wraps next with request-ID handling and a per-request access
-// log line. The ID is set on the response and on the request headers (so
-// the reverse proxy forwards it upstream) and is available downstream via
-// RequestIDFrom.
-func Middleware(logger *slog.Logger) func(http.Handler) http.Handler {
+// Middleware wraps next with request-ID handling, a per-request access
+// log line and the request-duration observation. The ID is set on the
+// response and on the request headers (so the reverse proxy forwards it
+// upstream) and is available downstream via RequestIDFrom.
+func Middleware(logger *slog.Logger, m *metrics.Metrics) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			start := time.Now()
@@ -50,11 +52,19 @@ func Middleware(logger *slog.Logger) func(http.Handler) http.Handler {
 			// Deferred so the line survives ReverseProxy's ErrAbortHandler
 			// panic on a failed body copy (the panic still propagates).
 			defer func() {
+				elapsed := time.Since(start)
+				// Observed only for requests that matched a route, so
+				// histogram observations mirror requests_total increments
+				// exactly: 404s and dot-segment rejects observe nothing,
+				// and reserved paths never enter this middleware at all.
+				if *routePrefix != "" {
+					m.RequestDuration.Observe(elapsed.Seconds())
+				}
 				logger.LogAttrs(ctx, slog.LevelInfo, "request",
 					slog.String("method", r.Method),
 					slog.String("path", r.URL.Path),
 					slog.Int("status", rec.status),
-					slog.Duration("duration", time.Since(start)),
+					slog.Duration("duration", elapsed),
 					slog.String("route", *routePrefix),
 					slog.String("identity", IdentityFor(r).String()),
 					slog.String("request_id", id),

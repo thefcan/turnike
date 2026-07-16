@@ -16,6 +16,7 @@ import (
 
 	"github.com/thefcan/turnike/internal/config"
 	"github.com/thefcan/turnike/internal/limiter"
+	"github.com/thefcan/turnike/internal/metrics"
 )
 
 // Gateway routes requests to their upstream via one reverse proxy per
@@ -28,6 +29,7 @@ type Gateway struct {
 	limiter limiter.Limiter
 	onError string // config.OnError*: what a limiter error means here
 	logger  *slog.Logger
+	metrics *metrics.Metrics
 }
 
 // NewGateway compiles routes into a gateway. All routes share one
@@ -36,7 +38,7 @@ type Gateway struct {
 // failure policy (config.OnError*): only fail_closed changes behavior
 // here - degrade is resolved inside the redis limiter itself, so by the
 // time an error reaches the gateway, open and degrade act alike.
-func NewGateway(routes []config.Route, up config.Upstream, lim limiter.Limiter, onError string, logger *slog.Logger) (*Gateway, error) {
+func NewGateway(routes []config.Route, up config.Upstream, lim limiter.Limiter, onError string, logger *slog.Logger, m *metrics.Metrics) (*Gateway, error) {
 	transport := &http.Transport{
 		DialContext:           (&net.Dialer{Timeout: time.Duration(up.DialTimeout)}).DialContext,
 		TLSHandshakeTimeout:   5 * time.Second,
@@ -51,8 +53,12 @@ func NewGateway(routes []config.Route, up config.Upstream, lim limiter.Limiter, 
 		limiter: lim,
 		onError: onError,
 		logger:  logger,
+		metrics: m,
 	}
 	for _, e := range g.table.entries {
+		// Pre-materialize every decision series for the route so rate()
+		// sees them from the first scrape (the route set is static).
+		m.InitRoute(e.Route.Prefix)
 		target, err := url.Parse(e.Route.Upstream)
 		if err != nil {
 			// Unreachable after config validation, but don't proxy blind.
@@ -99,7 +105,14 @@ func (g *Gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	eff := entry.Route.LimitFor(id.Value)
 	key := entry.Prefix + ":" + id.String()
 
-	switch dec, err := g.limiter.Allow(r.Context(), key, eff); {
+	dec, err := g.limiter.Allow(r.Context(), key, eff)
+	// One increment per matched request, before the outcome branches:
+	// nothing between setRoutePrefix above and this line returns early,
+	// and counting precedes proxying, so a ReverseProxy ErrAbortHandler
+	// panic cannot skip it. The histogram observe in Middleware keys
+	// off the same routePrefix, keeping observations == increments.
+	g.metrics.RequestsTotal.WithLabelValues(entry.Route.Prefix, decisionLabel(dec, err)).Inc()
+	switch {
 	case err != nil:
 		// The redis backend errors here when redis cannot answer and the
 		// policy is not degrade (degrade answers from its in-memory
@@ -123,6 +136,29 @@ func (g *Gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	g.proxies[entry.Prefix].ServeHTTP(w, r)
+}
+
+// decisionLabel maps a rate-limit outcome onto the requests_total
+// decision label. allow/deny are the configured backend's own verdict;
+// degrade_allow/degrade_deny are the degrade fallback's verdict - real
+// decisions, kept apart so a redis outage does not erase the 429 rate
+// from the graphs; bare degrade means no verdict existed - the limiter
+// errored and the failure policy decided the request instead
+// (fail_open pass-through, fail_closed 503, or the memory backend's
+// at-capacity fail-open).
+func decisionLabel(dec limiter.Decision, err error) string {
+	switch {
+	case err != nil:
+		return metrics.DecisionDegrade
+	case dec.Degraded && dec.Allowed:
+		return metrics.DecisionDegradeAllow
+	case dec.Degraded:
+		return metrics.DecisionDegradeDeny
+	case dec.Allowed:
+		return metrics.DecisionAllow
+	default:
+		return metrics.DecisionDeny
+	}
 }
 
 // writeRateLimitHeaders sets X-RateLimit-* on w. Called before the
