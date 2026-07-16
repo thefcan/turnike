@@ -183,6 +183,79 @@ would need hash-tagged keys under redis cluster. The multi-replica
 bypass is measured (see [`bench/REPORT.md`](bench/REPORT.md)); latency
 and throughput numbers wait for M6's load runs.
 
+## Observability
+
+Every gateway serves Prometheus metrics on `/metrics` — a reserved
+path like `/healthz` and `/readyz` (GET/HEAD only, answered ahead of
+the route table, outside the access log), so a scrape is never
+proxied, rate-limited, logged or self-counted. The registry holds
+exactly four families and no runtime collectors — more would be noise:
+
+| metric | type | labels | meaning |
+|---|---|---|---|
+| `turnike_requests_total` | counter | `route`, `decision` | requests that reached the rate-limit decision point |
+| `turnike_request_duration_seconds` | histogram | — | gateway answer duration, all outcomes (allowed answers include upstream time) |
+| `turnike_breaker_state` | gauge | — | circuit breaker: 0 closed, 1 open, 2 half-open; constant 0 under the memory backend |
+| `turnike_limiter_backend` | gauge | `backend` | one-hot: 1 for the backend that answered the most recent decision |
+
+The `decision` label answers *whose verdict was this*: `allow`/`deny`
+are the configured backend's own quota verdict; `degrade_allow` /
+`degrade_deny` are the in-memory fallback's verdict while redis is
+unreachable — kept apart so an outage doesn't erase the 429 rate from
+the graphs; bare `degrade` means no verdict existed at all (the
+`fail_open` pass-through or the `fail_closed` 503). The degrade family
+is deliberately wider than the `on_error: degrade` policy of the same
+name: whichever failure policy is configured produces it whenever the
+primary backend cannot answer.
+
+What is deliberately **not** a label: the client key. Identity is
+unauthenticated client input — the same reason the memory limiter caps
+its state map — so labeling by key would let any caller mint one time
+series per header value and grow the TSDB without bound. The `route`
+label is safe because it comes only from the static, config-sized
+route table; unmatched (404) paths are not counted at all, so scanner
+noise mints nothing either.
+
+### The dashboard, provisioned
+
+The demo compose carries prometheus (scraping all three replicas at
+1s) and grafana with a provisioned datasource and dashboard — no
+click-here instructions, the JSON in git is the panel set. Grafana is
+anonymous on <http://localhost:3300> (not grafana's native 3000, which
+half the dev servers in the world sit on) and lands straight on the
+dashboard; prometheus is at <http://localhost:9090>.
+
+```sh
+DEMO_BACKEND=degrade docker compose -f docker-compose.demo.yml up -d --build --wait
+while :; do seq 1 100 | xargs -P 8 -I{} curl -so /dev/null -H 'X-API-Key: demo-key' localhost:8090/demo/hello; done
+```
+
+The concurrency matters: a single sequential curl loop tops out at a
+few requests per second on a laptop, *below* the three replicas'
+aggregate fallback quota, and the degraded deny band would never
+appear. Eight parallel curls comfortably exceed both the shared 2/s
+quota (healthy: a solid `deny` band) and the replicas × 2/s aggregate
+fallback quota (degraded: a solid `degrade_deny` band).
+
+The drill: `docker compose -f docker-compose.demo.yml stop redis`. The
+requests panel turns `degrade_*` from the first unanswered call, each
+replica's breaker row flips Open after its 5th consecutive failure,
+and the active-backend rows flip to memory — the fallback keeps
+enforcing an instance-local quota, so over-admission stays bounded by
+replicas × limit while availability holds. Expect the first moments
+after the stop to crawl: until a replica's breaker trips, every
+decision burns the 1s redis client timeout before the fallback
+answers — the latency panel spikes toward 1s, then the open circuits
+make the fallback instant. That spike is the breaker earning its keep.
+`start redis` and the 1s-cooldown probes close the circuits, one
+replica per probe-carrying request. (Half-open lives for a single
+probe call, usually shorter than a scrape interval; it is pinned by
+unit tests rather than the panel.)
+
+Scope note: serving `/metrics` on the data-plane port — and letting
+the demo LB forward it — is a demo simplification. Production would
+bind a separate admin listener that the load balancer never routes.
+
 ## License
 
 [MIT](LICENSE)

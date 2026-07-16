@@ -23,27 +23,32 @@ update it before session end. Milestone definitions live in the build plan
       replicas over one shared redis), scripts/demo_bypass.sh with
       integrity/epoch/freshness guards, recorded runs in bench/ (memory
       90/150 admitted vs redis exactly 30/150), README comparison table
-- [ ] M5 — Observability: Prometheus metrics, /metrics, Grafana dashboard
+- [x] M5 — Observability: prometheus/client_golang (user-approved) on a
+      bare registry — exactly 4 families (requests by route+decision,
+      duration histogram, breaker gauge, one-hot backend gauge),
+      /metrics as a reserved path, prometheus + grafana provisioned
+      into the demo compose (committed dashboard JSON, uid-pinned
+      datasource), DEMO_BACKEND=degrade drill arm
 - [ ] M6 — Benchmarks + README-as-design-doc, demo-video shot list
 - [ ] M7 — OPTIONAL deploy (Fly.io) — requires user approval first
 
 ## Next action
 
-Start **M5** (observability): Prometheus metrics, a /metrics endpoint,
-Grafana dashboard. internal/metrics/ is an empty placeholder package.
-Shape to decide with the advisor: the metric set (requests by
-route/status, limiter allow/deny by algorithm+backend, breaker state
-transitions, redis round-trip timing), /metrics served as a reserved
-path like /healthz + /readyz (GET/HEAD-only, outside the access log),
-and where prometheus + grafana containers live (extend the demo compose
-or a separate observability compose). **prometheus/client_golang would
-be a new dependency — CLAUDE.md says ask the user before adding it**
-(stdlib-only expvar/hand-rolled text format is the alternative to put
-in front of them).
+Start **M6**: benchmarks + README-as-design-doc + demo-video shot
+list. bench/REPORT.md's "Latency / throughput" section is the
+placeholder to fill — load runs against the demo compose (the new
+turnike_request_duration_seconds histogram gives the gateway's own
+p50/p95/p99 to put next to the load generator's view; numbers only
+from recorded runs per CLAUDE.md). The README then gets its design-doc
+pass (M5 added ## Observability; keep the rewrite modest) and the
+demo-video shot list should include the grafana degrade drill —
+it is the most demoable thing the repo has.
 
-Advisor backlog: empty — all M4 ship-review findings (stale-stack
-reuse, RUN INVALID marking, footer name resolution, measured total)
-landed in M4.
+Advisor backlog: empty — all 10 M5 design pre-review findings were
+folded in before implementation, and all 5 ship-review findings
+(canceled-caller degrade blip, backend-gauge mutex + HELP caveats,
+drill quota vs loop math, dashboard memory-arm mislabel, label-test
+overclaim) landed in the fix commit.
 
 ## Decisions
 
@@ -218,6 +223,90 @@ landed in M4.
   commit stamp is captured once pre-run (arm 1 regenerating tracked
   bench files would otherwise mislabel arm 2 as `-dirty`).
 
+- Metrics set (M5, user-pinned + advisor-shaped): exactly four families
+  on a bare `prometheus.NewRegistry` (no Go/process collectors),
+  namespace `turnike_`, instance-scoped handle constructor-threaded
+  from cmd/gateway (no globals). `requests_total{route, decision}`
+  with decision ∈ {allow, deny, degrade_allow, degrade_deny, degrade}:
+  allow/deny = the configured backend's own verdict; degrade_* = the
+  degrade fallback's verdict (advisor pre-review: a single bare
+  `degrade` would erase the 429 rate during an outage); bare degrade =
+  no verdict existed (fail_open pass-through, fail_closed 503, memory
+  at-capacity fail-open) — the label family is wider than the
+  `on_error: degrade` policy name, documented in HELP + README.
+  Identity is NEVER a label (unauthenticated client input — the
+  maxKeys threat model at the TSDB layer, pinned by a scrape-sweep
+  test); route label only from the config table; 404s and reserved
+  paths uncounted; route×decision series pre-materialized so rate()
+  sees them from the first scrape.
+- Degrade seam (M5): `Decision.Degraded bool`, set only on the
+  fallback-success return, observability-only. Rejected alternatives:
+  an exported breaker-state accessor (the fallback answers on the 4
+  pre-trip failures too — breaker closed while degrading) and
+  limiter-side counting (no route label there). `context.Canceled`
+  skips the fallback entirely (ship review): the breaker holds it
+  neutral and a fallback answer would paint a degrade blip + backend
+  flip for a client hang-up on healthy redis.
+- Limiter instrumentation (M5): `limiter.Instruments` carries two
+  small structural interfaces (breaker gauge `Set(float64)`, backend
+  `SetActiveBackend(string)`) so internal/limiter imports neither
+  metrics nor client_golang; zero value = no-ops. The breaker writes
+  state through one `setState` choke point under its mutex (gauge
+  exports the breaker's own 0/1/2 consts, materialized at
+  construction, constant 0 under the memory backend — HELP says so).
+  `limiter_backend{backend}` one-hot: set on who answered (redis
+  script success / fallback answer); error paths without a fallback
+  leave it alone (under fail_open/fail_closed nothing else answers —
+  breaker_state carries those outages); flips serialized by a mutex
+  (last decision literally wins; a scrape may catch one mid-flip);
+  redis construction marks redis active, and building the degrade
+  fallback must not flip it (pinned).
+- Histogram (M5): `request_duration_seconds` label-less, all outcomes
+  (denials observed too — quantiles move with the deny mix; HELP,
+  README and the panel say so). Buckets = [.5ms, 1ms, 2.5ms] +
+  DefBuckets, worded as expectation (loopback answers would pile into
+  DefBuckets' 5ms floor) — measured latency numbers wait for M6.
+  Observed in the middleware's deferred block gated on the same
+  routePrefix the counter requires → observations == increments,
+  pinned across allow/429/fail_closed-503/404/reserved.
+- /metrics (M5): third reserved path, GET/HEAD-only 405+Allow
+  (promhttp answers POST if left alone — the guard is load-bearing),
+  outside the access log and the quota, zero config surface
+  (KnownFields(true) untouched). Data-plane /metrics + LB forwarding
+  is a documented demo simplification (README scope note: production
+  binds a separate admin listener).
+- Demo observability (M5): prom/prometheus:v3.5.5 (LTS) +
+  grafana/grafana:12.4.5 in the demo compose, always on (user pin:
+  plain `docker compose up` gives everyone the same panels — no
+  profiles); provisioning via ro bind mounts under demo/ only (the
+  `down --volumes` teardown wiping grafana state between runs is the
+  same-panels guarantee); datasource uid "prometheus" pinned in both
+  the provisioning yml and every panel. Grafana anonymous Viewer on
+  host **3300** (native 3000 is the most commonly dev-occupied port
+  and a clash would wedge `up --wait` for measured runs), prometheus
+  9090 — amends M4's only-nginx-publishes rule (its rationale was
+  dev-compose clashes; these clash with nothing). scrape_interval 1s
+  (breaker cooldown is 1s; half-open is sub-scrape and pinned by unit
+  tests — the panel description says so). No healthchecks on the pair
+  so demo_bypass.sh's `up -d --wait` cannot wedge; `make demo`
+  re-verified green with both new services up.
+- Degrade drill arm (M5): demo/gateway-degrade.yaml
+  (DEMO_BACKEND=degrade, on_error degrade, fixed_window **2**/1s) —
+  M4's redis arm deliberately pins fail_closed, so no existing arm
+  could show the flip; demo_bypass.sh still drives only memory|redis.
+  Quota 2/s + an 8-way parallel curl hammer keep a deny band visible
+  in BOTH phases (measured: healthy allow +4/deny 294; degraded
+  degrade_allow +6/degrade_deny 294) — a sequential curl loop tops out
+  below the replicas' aggregate fallback quota and hides the degraded
+  deny band entirely (the ship review caught the original rate-5 +
+  paced-loop combination making the claim mathematically impossible).
+  Field note confirmed live: until each replica's breaker trips, every
+  decision burns the 1s client timeout (Docker Desktop turns
+  stopped-container dials into ~1s hangs), so the first post-stop
+  seconds crawl at ~1 rps/replica and a short loop never reaches the
+  5-failure threshold; the README warns about the spike and calls it
+  the breaker earning its keep.
+
 ### Open (waiting on user)
 - M7 deploy (Fly.io + managed Redis): do it at all? Accounts/cost are the
   user's call — ask before starting.
@@ -290,6 +379,41 @@ landed in M4.
   drain (exit 0). Field note: Docker Desktop's port forward turns
   stopped-container dials into ~1s timeouts rather than refusals — the
   1s client budgets + breaker absorbed it as designed.
+- **2026-07-17** — Session 6: M5 shipped in 8 commits
+  (client_golang v1.23.2 user-approved in plan review). Advisor
+  consulted twice, both rounds FIX FIRST, everything folded in: (1)
+  design pre-review, 10 findings before a line was written — decision
+  label split (degrade → degrade_allow/degrade_deny + bare degrade),
+  limiter.Instruments structural interfaces instead of a metrics
+  import, one-hot weakened to last-decision-wins + boot redis=1,
+  bucket comment as expectation not measurement, histogram documented
+  all-outcomes, grafana host 3300 over clash-prone 3000, 1s scrape for
+  the 1s breaker, nil-gauge no-op so existing tests survive, histogram
+  asserts on the 429/503 paths + a sequence-recording gauge fake,
+  admin-listener scope note; (2) ship review, 5 findings — the
+  canceled-caller fake-degrade blip (only behavior change: neutral
+  errors skip the fallback), SetActiveBackend mutex + HELP caveats,
+  the drill's rate-5-vs-paced-loop math making its own claim
+  impossible (now 2/s + a parallel hammer, re-measured), the
+  dashboard's "memory (degraded)" mislabel on the memory arm, and the
+  childless-vec blind spot in the label test (cardinality pin moved to
+  a wire-format scrape sweep). Verified live: binary smoke (4 families
+  only, POST 405, scrape unlogged/uncounted), single-instance degrade
+  drill against dev redis (3×200+5×429 via redis; stop → 7
+  degrade_allow + 3 degrade_deny, breaker-open log carries the dial
+  error; start → probe closes), full demo stack (3 targets up,
+  provisioned dashboard on grafana 12.4.5 by uid, stop redis → all
+  three replicas flip breaker=Open/backend=memory, hammer paints
+  degrade_deny 294; recovery closes circuits one probe-carrying
+  request per replica), `make demo` end-to-end green with prometheus +
+  grafana aboard (memory 90/150, redis exactly 30/150, no --wait
+  wedge, `git restore bench/` after — recorded M4 numbers stand),
+  `go test -race` + lint green at every commit boundary, `go mod
+  tidy` diff-free. Field note: a sequential curl loop through the LB
+  tops out at a few rps (curl spawn + docker forward), and until the
+  breakers trip each unanswered decision burns the full 1s client
+  timeout — both discovered by the ship-review math and confirmed by
+  measurement before the README's drill instructions were written.
 - **2026-07-17** — Session 5: M4 shipped in 7 commits, zero Go changes
   (compose + nginx + bash + recorded measurements + docs). Advisor
   consulted twice: (1) design pre-review — SOUND, six findings folded
