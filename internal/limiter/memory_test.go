@@ -129,7 +129,7 @@ func TestNew(t *testing.T) {
 	logger := slog.New(slog.DiscardHandler)
 
 	t.Run("memory backend", func(t *testing.T) {
-		lim, err := New(config.Limiter{Backend: config.BackendMemory}, RealClock{}, logger)
+		lim, err := New(config.Limiter{Backend: config.BackendMemory}, RealClock{}, logger, Instruments{})
 		if err != nil {
 			t.Fatalf("New: %v", err)
 		}
@@ -145,7 +145,7 @@ func TestNew(t *testing.T) {
 		lim, err := New(config.Limiter{
 			Backend: config.BackendRedis,
 			Redis:   config.Redis{Addr: "127.0.0.1:1", OnError: config.OnErrorDegrade},
-		}, RealClock{}, logger)
+		}, RealClock{}, logger, Instruments{})
 		if err != nil {
 			t.Fatalf("New(redis) with unreachable addr: %v, want success", err)
 		}
@@ -162,7 +162,7 @@ func TestNew(t *testing.T) {
 	})
 
 	t.Run("unknown backend", func(t *testing.T) {
-		_, err := New(config.Limiter{Backend: "memcached"}, RealClock{}, logger)
+		_, err := New(config.Limiter{Backend: "memcached"}, RealClock{}, logger, Instruments{})
 		if err == nil {
 			t.Fatal("New(memcached): want error, got nil")
 		}

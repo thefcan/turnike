@@ -5,6 +5,7 @@ import (
 	"errors"
 	"log/slog"
 	"reflect"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -85,7 +86,8 @@ func newFakeRedisLimiter(f *fakeScripter) *RedisLimiter {
 	logger := slog.New(slog.DiscardHandler)
 	return &RedisLimiter{
 		scripter: f,
-		breaker:  newBreaker(&manualClock{t: time.Unix(1_000_000_000, 0)}, logger),
+		breaker:  newBreaker(&manualClock{t: time.Unix(1_000_000_000, 0)}, logger, nil),
+		backend:  nopBackend{},
 		logger:   logger,
 	}
 }
@@ -220,8 +222,9 @@ func TestRedisLimiterDegradeFallsBackToMemory(t *testing.T) {
 	f := &fakeScripter{err: errors.New("dial tcp: connection refused")}
 	l := &RedisLimiter{
 		scripter: f,
-		breaker:  newBreaker(clock, logger),
+		breaker:  newBreaker(clock, logger, nil),
 		fallback: NewMemoryLimiter(clock),
+		backend:  nopBackend{},
 		logger:   logger,
 	}
 	limit := config.Limit{Algorithm: config.AlgoFixedWindow, Rate: 2, Window: config.Duration(time.Minute)}
@@ -249,14 +252,86 @@ func TestRedisLimiterDegradeFallsBackToMemory(t *testing.T) {
 	}
 }
 
+// recordingBackend captures SetActiveBackend calls in order.
+type recordingBackend struct{ calls []string }
+
+func (r *recordingBackend) SetActiveBackend(b string) { r.calls = append(r.calls, b) }
+
+func TestRedisLimiterBackendFollowsWhoAnswered(t *testing.T) {
+	clock := &manualClock{t: time.Unix(1_000_000_000, 0)}
+	logger := slog.New(slog.DiscardHandler)
+	rec := &recordingBackend{}
+	f := &fakeScripter{err: errors.New("dial tcp: connection refused")}
+	l := &RedisLimiter{
+		scripter: f,
+		breaker:  newBreaker(clock, logger, nil),
+		fallback: NewMemoryLimiter(clock),
+		backend:  rec,
+		logger:   logger,
+	}
+	limit := config.Limit{Algorithm: config.AlgoFixedWindow, Rate: 5, Window: config.Duration(time.Minute)}
+
+	// The fallback answers: the flip to memory is the graph's
+	// "degrade dip".
+	if _, err := l.Allow(context.Background(), "k", limit); err != nil {
+		t.Fatalf("degraded Allow: %v", err)
+	}
+	if want := []string{config.BackendMemory}; !slices.Equal(rec.calls, want) {
+		t.Fatalf("after a fallback answer: calls = %v, want %v", rec.calls, want)
+	}
+
+	// redis recovers: the next redis-answered decision flips it back.
+	f.mu.Lock()
+	f.err = nil
+	f.reply = []any{int64(1), int64(4), int64(1_700_000_060_000_000), int64(0)}
+	f.mu.Unlock()
+	if _, err := l.Allow(context.Background(), "k", limit); err != nil {
+		t.Fatalf("recovered Allow: %v", err)
+	}
+	if want := []string{config.BackendMemory, config.BackendRedis}; !slices.Equal(rec.calls, want) {
+		t.Fatalf("after recovery: calls = %v, want %v", rec.calls, want)
+	}
+}
+
+func TestNewMarksConfiguredBackendActive(t *testing.T) {
+	logger := slog.New(slog.DiscardHandler)
+	clock := &manualClock{t: time.Unix(1_000_000_000, 0)}
+
+	rec := &recordingBackend{}
+	if _, err := New(config.Limiter{Backend: config.BackendMemory}, clock, logger, Instruments{Backend: rec}); err != nil {
+		t.Fatalf("New(memory): %v", err)
+	}
+	if want := []string{config.BackendMemory}; !slices.Equal(rec.calls, want) {
+		t.Fatalf("memory backend: calls = %v, want %v", rec.calls, want)
+	}
+
+	// The redis backend marks redis active at construction, and
+	// building the degrade fallback (a MemoryLimiter) must not flip
+	// the gauge to memory - nothing has answered yet.
+	rec = &recordingBackend{}
+	cfg := config.Limiter{
+		Backend: config.BackendRedis,
+		Redis:   config.Redis{Addr: "127.0.0.1:1", OnError: config.OnErrorDegrade},
+	}
+	lim, err := New(cfg, clock, logger, Instruments{Backend: rec})
+	if err != nil {
+		t.Fatalf("New(redis): %v", err)
+	}
+	t.Cleanup(func() { _ = lim.(*RedisLimiter).Close() })
+	if want := []string{config.BackendRedis}; !slices.Equal(rec.calls, want) {
+		t.Fatalf("redis+degrade construction: calls = %v, want %v", rec.calls, want)
+	}
+}
+
 func TestRedisLimiterBreakerStopsCallingRedis(t *testing.T) {
 	clock := &manualClock{t: time.Unix(1_000_000_000, 0)}
 	logger := slog.New(slog.DiscardHandler)
 	f := &fakeScripter{err: errors.New("dial tcp: connection refused")}
 	l := &RedisLimiter{
 		scripter: f,
-		breaker:  newBreaker(clock, logger),
+		breaker:  newBreaker(clock, logger, nil),
 		fallback: NewMemoryLimiter(clock),
+		backend:  nopBackend{},
 		logger:   logger,
 	}
 	limit := config.Limit{Algorithm: config.AlgoFixedWindow, Rate: 100, Window: config.Duration(time.Minute)}

@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"log/slog"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -15,7 +16,7 @@ var errRedisDown = errors.New("dial tcp: connection refused")
 
 func newTestBreaker() (*breaker, *manualClock) {
 	clock := &manualClock{t: time.Unix(1_000_000_000, 0)}
-	return newBreaker(clock, slog.New(slog.DiscardHandler)), clock
+	return newBreaker(clock, slog.New(slog.DiscardHandler), nil), clock
 }
 
 // failN drives the breaker to the open state with threshold failures.
@@ -198,13 +199,43 @@ func TestBreakerOpenTransitionLogsTheError(t *testing.T) {
 	// carry the underlying error.
 	var buf bytes.Buffer
 	clock := &manualClock{t: time.Unix(1_000_000_000, 0)}
-	b := newBreaker(clock, slog.New(slog.NewTextHandler(&buf, nil)))
+	b := newBreaker(clock, slog.New(slog.NewTextHandler(&buf, nil)), nil)
 	scriptBug := errors.New("WRONGTYPE Operation against a key holding the wrong kind of value")
 	for i := 0; i < breakerFailureThreshold; i++ {
 		_ = b.do(func() error { return scriptBug })
 	}
 	if !strings.Contains(buf.String(), "WRONGTYPE") {
 		t.Errorf("open-transition log does not carry the underlying error:\n%s", buf.String())
+	}
+}
+
+// recordingGauge captures every Set in order, so a test can assert
+// the full write sequence - a final-value check could not fail on a
+// missed intermediate transition.
+type recordingGauge struct{ vals []float64 }
+
+func (g *recordingGauge) Set(v float64) { g.vals = append(g.vals, v) }
+
+func TestBreakerGaugeTracksStateSequence(t *testing.T) {
+	g := &recordingGauge{}
+	clock := &manualClock{t: time.Unix(1_000_000_000, 0)}
+	b := newBreaker(clock, slog.New(slog.DiscardHandler), g)
+
+	trip(t, b)
+	clock.t = clock.t.Add(BreakerCooldown)
+	if err := b.do(func() error { return nil }); err != nil {
+		t.Fatalf("probe: %v", err)
+	}
+
+	want := []float64{
+		float64(stateClosed),   // materialized at construction
+		float64(stateOpen),     // the threshold-th failure trips it
+		float64(stateHalfOpen), // cooldown over, this caller probes
+		float64(stateClosed),   // successful probe
+	}
+	if !slices.Equal(g.vals, want) {
+		t.Fatalf("gauge writes = %v, want %v (failures 1..%d must not write)",
+			g.vals, want, breakerFailureThreshold-1)
 	}
 }
 

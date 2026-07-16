@@ -57,16 +57,52 @@ type RealClock struct{}
 // Now implements Clock.
 func (RealClock) Now() time.Time { return time.Now() }
 
+// Instruments carries the limiter's observability hooks as small
+// structural interfaces - satisfied by the metrics package's
+// instruments - so this package never imports the metrics package or
+// the prometheus client. The zero value is valid: nil hooks become
+// no-ops.
+type Instruments struct {
+	// Breaker receives the circuit breaker state as the breaker's own
+	// constants (0 closed, 1 open, 2 half-open) on every transition.
+	Breaker interface{ Set(float64) }
+	// Backend receives the backend that answered the most recent
+	// decision (config.BackendRedis / config.BackendMemory).
+	Backend interface{ SetActiveBackend(active string) }
+}
+
+type nopBackend struct{}
+
+func (nopBackend) SetActiveBackend(string) {}
+
+// withDefaults replaces nil hooks with no-ops so constructors and
+// tests can pass a zero Instruments.
+func (ins Instruments) withDefaults() Instruments {
+	if ins.Breaker == nil {
+		ins.Breaker = nopGauge{}
+	}
+	if ins.Backend == nil {
+		ins.Backend = nopBackend{}
+	}
+	return ins
+}
+
 // New builds the Limiter selected by cfg.Backend. cfg is assumed to be
 // config-validated (Backend is "memory" or "redis"). clock drives the
 // in-memory algorithms - the redis backend sources time from redis TIME
-// instead - and logger carries backend diagnostics.
-func New(cfg config.Limiter, clock Clock, logger *slog.Logger) (Limiter, error) {
+// instead - and logger carries backend diagnostics. ins hooks are
+// optional (zero value = unobserved).
+func New(cfg config.Limiter, clock Clock, logger *slog.Logger, ins Instruments) (Limiter, error) {
+	ins = ins.withDefaults()
 	switch cfg.Backend {
 	case config.BackendMemory:
+		// The memory backend is the primary here, not a fallback; mark
+		// it active once. No breaker exists, so the breaker gauge
+		// keeps reporting its registered value of 0 (closed).
+		ins.Backend.SetActiveBackend(config.BackendMemory)
 		return NewMemoryLimiter(clock), nil
 	case config.BackendRedis:
-		return NewRedisLimiter(cfg.Redis, clock, logger), nil
+		return NewRedisLimiter(cfg.Redis, clock, logger, ins), nil
 	default:
 		// Unreachable after config validation, but don't silently no-op.
 		return nil, fmt.Errorf("limiter: unknown backend %q", cfg.Backend)

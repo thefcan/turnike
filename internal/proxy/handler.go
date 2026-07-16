@@ -29,7 +29,7 @@ const readyCheckTimeout = time.Second
 //
 // lim is injected rather than built from cfg here so tests can drive a
 // MemoryLimiter on a manual clock; cmd/gateway/main.go builds the
-// production one via limiter.New(cfg.Limiter, limiter.RealClock{}).
+// production one via limiter.New with its Instruments wired.
 //
 // The dispatch is deliberately not an http.ServeMux — the mux
 // 301-redirects uncleaned paths, which would break POSTs through the

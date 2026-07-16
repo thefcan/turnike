@@ -87,7 +87,8 @@ type RedisLimiter struct {
 	client   *redis.Client
 	scripter redis.Scripter // == client in production; a fake in unit tests
 	breaker  *breaker
-	fallback Limiter // in-memory stand-in while redis is down; nil unless on_error: degrade
+	fallback Limiter                                      // in-memory stand-in while redis is down; nil unless on_error: degrade
+	backend  interface{ SetActiveBackend(active string) } // who answered last; never nil (nop when unwired)
 	logger   *slog.Logger
 }
 
@@ -95,8 +96,10 @@ type RedisLimiter struct {
 // fails on an unreachable redis: crash-looping while redis is briefly
 // down would be strictly worse than coming up under the failure policy.
 // clock drives the breaker and the degrade fallback; decisions
-// themselves only ever see redis TIME.
-func NewRedisLimiter(cfg config.Redis, clock Clock, logger *slog.Logger) *RedisLimiter {
+// themselves only ever see redis TIME. ins hooks are optional (zero
+// value = unobserved).
+func NewRedisLimiter(cfg config.Redis, clock Clock, logger *slog.Logger, ins Instruments) *RedisLimiter {
+	ins = ins.withDefaults()
 	client := redis.NewClient(&redis.Options{
 		Addr:         cfg.Addr,
 		DialTimeout:  redisDialTimeout,
@@ -110,9 +113,15 @@ func NewRedisLimiter(cfg config.Redis, clock Clock, logger *slog.Logger) *RedisL
 	l := &RedisLimiter{
 		client:   client,
 		scripter: client,
-		breaker:  newBreaker(clock, logger),
+		breaker:  newBreaker(clock, logger, ins.Breaker),
+		backend:  ins.Backend,
 		logger:   logger,
 	}
+	// The configured backend is presumed active until a decision says
+	// otherwise, so a scrape racing boot never reads "memory" for a
+	// healthy redis deployment. Note the degrade fallback built below
+	// must not flip this - it answers nothing until redis fails.
+	l.backend.SetActiveBackend(config.BackendRedis)
 	if cfg.OnError == config.OnErrorDegrade {
 		// Built once at boot, not per breaker trip: a flapping breaker
 		// must not churn allocations, and stale state self-heals anyway
@@ -173,10 +182,14 @@ func (l *RedisLimiter) Allow(ctx context.Context, key string, limit config.Limit
 				return dec, fbErr
 			}
 			dec.Degraded = true
+			l.backend.SetActiveBackend(config.BackendMemory)
 			return dec, nil
 		}
 		return Decision{}, fmt.Errorf("limiter: redis %s: %w", limit.Algorithm, err)
 	}
+	// redis answered this call - under fail_open/fail_closed nothing
+	// else ever answers, so error paths above leave the gauge alone.
+	l.backend.SetActiveBackend(config.BackendRedis)
 	return decisionFromReply(vals, entry.limitOf(limit))
 }
 

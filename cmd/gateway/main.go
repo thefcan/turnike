@@ -15,6 +15,7 @@ import (
 
 	"github.com/thefcan/turnike/internal/config"
 	"github.com/thefcan/turnike/internal/limiter"
+	"github.com/thefcan/turnike/internal/metrics"
 	"github.com/thefcan/turnike/internal/proxy"
 )
 
@@ -64,7 +65,14 @@ func serve(ctx context.Context, cfg *config.Config, ln net.Listener, logger *slo
 	// ErrClosed. This covers the error returns before Serve starts.
 	defer func() { _ = ln.Close() }()
 
-	lim, err := limiter.New(cfg.Limiter, limiter.RealClock{}, logger)
+	// One instrument set for the process, constructor-threaded to the
+	// limiter (breaker + backend gauges) and the proxy (counter,
+	// histogram, /metrics) - no package-level registry anywhere.
+	m := metrics.New()
+	lim, err := limiter.New(cfg.Limiter, limiter.RealClock{}, logger, limiter.Instruments{
+		Breaker: m.BreakerState,
+		Backend: m,
+	})
 	if err != nil {
 		return err
 	}

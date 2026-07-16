@@ -32,6 +32,17 @@ const (
 	stateHalfOpen
 )
 
+// gauge is the breaker_state hook: prometheus.Gauge satisfies it, and
+// a one-method local interface keeps the prometheus client out of
+// this package while making a recording test fake trivial. The gauge
+// exports the state constants above verbatim (0/1/2).
+type gauge interface{ Set(float64) }
+
+// nopGauge is the default when no instrumentation is wired.
+type nopGauge struct{}
+
+func (nopGauge) Set(float64) {}
+
 // breaker is a minimal three-state circuit breaker: closed until
 // breakerFailureThreshold consecutive failures, open (rejecting without
 // touching redis) for BreakerCooldown, then half-open admitting exactly
@@ -41,6 +52,7 @@ const (
 type breaker struct {
 	clock  Clock
 	logger *slog.Logger
+	gauge  gauge // never nil; nopGauge when unwired
 
 	mu       sync.Mutex
 	state    int
@@ -48,8 +60,22 @@ type breaker struct {
 	openedAt time.Time // meaningful in open
 }
 
-func newBreaker(clock Clock, logger *slog.Logger) *breaker {
-	return &breaker{clock: clock, logger: logger}
+func newBreaker(clock Clock, logger *slog.Logger, g gauge) *breaker {
+	if g == nil {
+		g = nopGauge{}
+	}
+	b := &breaker{clock: clock, logger: logger, gauge: g}
+	// Materialize closed so the series reads 0 before any traffic.
+	b.gauge.Set(float64(stateClosed))
+	return b
+}
+
+// setState is the single choke point for state writes, so the gauge
+// can never miss a transition. Callers hold b.mu; Gauge.Set is one
+// atomic store, so no lock-ordering concern arises.
+func (b *breaker) setState(s int) {
+	b.state = s
+	b.gauge.Set(float64(s))
 }
 
 // do runs fn under the breaker's supervision and returns its error, or
@@ -72,7 +98,7 @@ func (b *breaker) admit() error {
 			return errBreakerOpen
 		}
 		// Cooldown over: this caller becomes the single probe.
-		b.state = stateHalfOpen
+		b.setState(stateHalfOpen)
 		return nil
 	case stateHalfOpen:
 		// A probe is already in flight; half-open *means* that.
@@ -103,7 +129,7 @@ func (b *breaker) record(err error) {
 		default:
 			b.failures++
 			if b.failures >= breakerFailureThreshold {
-				b.state = stateOpen
+				b.setState(stateOpen)
 				b.openedAt = b.clock.Now()
 				// Carry the underlying error: under the degrade policy a
 				// permanent script bug would otherwise masquerade as an
@@ -115,7 +141,7 @@ func (b *breaker) record(err error) {
 	case stateHalfOpen:
 		switch {
 		case err == nil:
-			b.state = stateClosed
+			b.setState(stateClosed)
 			b.failures = 0
 			b.logger.Info("redis circuit closed by successful probe")
 		case neutral(err):
@@ -123,9 +149,9 @@ func (b *breaker) record(err error) {
 			// open with openedAt untouched, so the next caller re-probes
 			// immediately instead of waiting out a fresh cooldown - and
 			// so the breaker cannot wedge in half-open.
-			b.state = stateOpen
+			b.setState(stateOpen)
 		default:
-			b.state = stateOpen
+			b.setState(stateOpen)
 			b.openedAt = b.clock.Now()
 			b.logger.Warn("redis circuit re-opened by failed probe", "err", err)
 		}
