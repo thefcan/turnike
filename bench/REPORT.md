@@ -13,7 +13,7 @@ runs is the `limiter` block of the gateway config. Reproduce with
 `./scripts/demo_bypass.sh` (or `make demo`).
 
 Source: `demo_bypass_memory.txt`, `demo_bypass_redis.txt` (both from
-commit `4a14747`, 2026-07-16, summary lines at the bottom of each file).
+commit `47ad2c4`, 2026-07-16, summary lines at the bottom of each file).
 
 | backend | quota | requests | admitted (200) | denied (429) | other |
 | ------- | ----: | -------: | -------------: | -----------: | ----: |
@@ -28,9 +28,10 @@ Per-replica spread (source: the `# upstream` footer lines of each file):
 | gateway-2 |               50 |          30 |              50 |         10 |
 | gateway-3 |               50 |          30 |              50 |         10 |
 
-(IP→replica mapping is pinned in each raw file's header; the redis run's
-per-replica 200s are 10/10/10 because round-robin interleaves one shared
-countdown across the three replicas.)
+(Footer lines carry the resolved `gateway-N (ip:port)` names, and the
+IP→replica mapping is also pinned in each raw file's header. The redis
+run's per-replica 200s are 10/10/10 because round-robin interleaves one
+shared countdown across the three replicas.)
 
 ### Reading
 
