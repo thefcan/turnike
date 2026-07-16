@@ -106,8 +106,9 @@ func TestHandlerHealthMethodGuard(t *testing.T) {
 	up := echoUpstream(t, "api")
 	h := newTestHandler(t, slog.New(slog.DiscardHandler), up.URL)
 
-	// A monitor probing with the wrong method must not read healthy.
-	for _, path := range []string{"/healthz", "/readyz"} {
+	// A monitor probing with the wrong method must not read healthy -
+	// and promhttp on its own would answer a POST /metrics.
+	for _, path := range []string{"/healthz", "/readyz", "/metrics"} {
 		for _, method := range []string{"POST", "PUT", "DELETE"} {
 			r := httptest.NewRequest(method, path, nil)
 			w := httptest.NewRecorder()
@@ -158,6 +159,65 @@ func TestHandlerReadyCheckTimeout(t *testing.T) {
 	// for the prober's lifetime.
 	if elapsed > 5*time.Second {
 		t.Errorf("/readyz took %v, want ~%v (per-check timeout)", elapsed, readyCheckTimeout)
+	}
+}
+
+func TestHandlerMetricsEndpoint(t *testing.T) {
+	up := echoUpstream(t, "api")
+	var buf bytes.Buffer
+	logger := slog.New(slog.NewJSONHandler(&buf, nil))
+	m := metrics.New()
+	cfg := &config.Config{Routes: []config.Route{{Prefix: "/", Upstream: up.URL}}}
+	h, err := NewHandler(cfg, logger, allowAllLimiter{}, m)
+	if err != nil {
+		t.Fatalf("NewHandler: %v", err)
+	}
+
+	// One routed request so the scrape has something to show.
+	r := httptest.NewRequest("GET", "/api/x", nil)
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, r)
+	if w.Code != http.StatusOK {
+		t.Fatalf("routed request = %d, want 200", w.Code)
+	}
+
+	scrape := func() *httptest.ResponseRecorder {
+		t.Helper()
+		w := httptest.NewRecorder()
+		h.ServeHTTP(w, httptest.NewRequest("GET", "/metrics", nil))
+		return w
+	}
+	w = scrape()
+	if w.Code != http.StatusOK {
+		t.Fatalf("GET /metrics = %d, want 200", w.Code)
+	}
+	body := w.Body.String()
+	for _, family := range []string{
+		"turnike_requests_total",
+		"turnike_request_duration_seconds",
+		"turnike_breaker_state",
+		"turnike_limiter_backend",
+	} {
+		if !strings.Contains(body, family) {
+			t.Errorf("scrape is missing family %s", family)
+		}
+	}
+	const oneAllow = `turnike_requests_total{decision="allow",route="/"} 1`
+	if !strings.Contains(body, oneAllow) {
+		t.Errorf("scrape does not show the routed request:\n%s", body)
+	}
+	if strings.Contains(body, "go_goroutines") {
+		t.Error("scrape leaks Go runtime collectors; the registry must stay at the four families")
+	}
+
+	// Scraping is self-invisible: reserved paths bypass the middleware,
+	// so a scrape is neither counted, nor observed, nor access-logged.
+	w = scrape()
+	if !strings.Contains(w.Body.String(), oneAllow) {
+		t.Error("a scrape moved the counters; /metrics must not count itself")
+	}
+	if n := strings.Count(buf.String(), `"msg":"request"`); n != 1 {
+		t.Errorf("access log has %d request lines, want 1 (scrapes must not log)", n)
 	}
 }
 

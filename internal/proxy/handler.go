@@ -23,10 +23,11 @@ type ReadyCheck func(context.Context) error
 // useful definition; a knob for this would be pure config surface.
 const readyCheckTimeout = time.Second
 
-// NewHandler wires the health endpoints, the request-ID/access-log
-// middleware and the gateway (with the given Limiter) into the root
-// handler. /healthz and /readyz are reserved: they take precedence over
-// configured routes and bypass the middleware.
+// NewHandler wires the health endpoints, the metrics endpoint, the
+// request-ID/access-log middleware and the gateway (with the given
+// Limiter) into the root handler. /healthz, /readyz and /metrics are
+// reserved: they take precedence over configured routes and bypass the
+// middleware, so a scrape is never logged, rate-limited or counted.
 //
 // lim is injected rather than built from cfg here so tests can drive a
 // MemoryLimiter on a manual clock; cmd/gateway/main.go builds the
@@ -49,38 +50,44 @@ func NewHandler(cfg *config.Config, logger *slog.Logger, lim limiter.Limiter, m 
 		return nil, err
 	}
 	proxied := Middleware(logger, m)(gw)
+	metricsHandler := m.Handler()
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
-		case "/healthz", "/readyz":
-			// Probes speak GET/HEAD; answering 200 to anything else
-			// would let a misconfigured monitor read healthy forever.
-			// The proxy branch below stays method-agnostic - the
-			// gateway must forward every method. (net/http suppresses
-			// response bodies on HEAD by itself.)
+		case "/healthz", "/readyz", "/metrics":
+			// Probes and scrapers speak GET/HEAD; answering 200 to
+			// anything else would let a misconfigured monitor read
+			// healthy forever - and promhttp left alone would answer a
+			// POST with metrics, so the guard is load-bearing here, not
+			// cosmetic. The proxy branch below stays method-agnostic -
+			// the gateway must forward every method. (net/http
+			// suppresses response bodies on HEAD by itself.)
 			if r.Method != http.MethodGet && r.Method != http.MethodHead {
 				w.Header().Set("Allow", "GET, HEAD")
 				writeText(w, http.StatusMethodNotAllowed, "method not allowed")
 				return
 			}
-			if r.URL.Path == "/healthz" {
+			switch r.URL.Path {
+			case "/metrics":
+				metricsHandler.ServeHTTP(w, r)
+			case "/healthz":
 				writeText(w, http.StatusOK, "ok")
-				return
-			}
-			for _, check := range ready {
-				cctx, cancel := context.WithTimeout(r.Context(), readyCheckTimeout)
-				err := check(cctx)
-				cancel()
-				if err != nil {
-					// Reason to the log, not the body: these endpoints
-					// answer ahead of the route table to any caller,
-					// and dependency errors name internal topology
-					// (e.g. the redis addr).
-					logger.Warn("readiness check failed", "err", err)
-					writeText(w, http.StatusServiceUnavailable, "not ready")
-					return
+			default: // /readyz
+				for _, check := range ready {
+					cctx, cancel := context.WithTimeout(r.Context(), readyCheckTimeout)
+					err := check(cctx)
+					cancel()
+					if err != nil {
+						// Reason to the log, not the body: these
+						// endpoints answer ahead of the route table to
+						// any caller, and dependency errors name
+						// internal topology (e.g. the redis addr).
+						logger.Warn("readiness check failed", "err", err)
+						writeText(w, http.StatusServiceUnavailable, "not ready")
+						return
+					}
 				}
+				writeText(w, http.StatusOK, "ok")
 			}
-			writeText(w, http.StatusOK, "ok")
 		default:
 			proxied.ServeHTTP(w, r)
 		}
