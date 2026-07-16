@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -208,6 +209,26 @@ func TestHandlerMetricsEndpoint(t *testing.T) {
 	}
 	if strings.Contains(body, "go_goroutines") {
 		t.Error("scrape leaks Go runtime collectors; the registry must stay at the four families")
+	}
+
+	// The wire-level cardinality pin: every label name on every series
+	// minted by real traffic stays in the bounded vocabulary (le is
+	// the histogram's own bucket label). This is the check the metrics
+	// package's structural test cannot make - a vec whose series only
+	// appear under traffic is invisible to a bare Gather.
+	seriesRe := regexp.MustCompile(`^turnike_[a-z_]+\{([^}]*)\}`)
+	nameRe := regexp.MustCompile(`([a-zA-Z_][a-zA-Z0-9_]*)="`)
+	allowedLabels := map[string]bool{"route": true, "decision": true, "backend": true, "le": true}
+	for _, line := range strings.Split(body, "\n") {
+		match := seriesRe.FindStringSubmatch(line)
+		if match == nil {
+			continue
+		}
+		for _, pair := range nameRe.FindAllStringSubmatch(match[1], -1) {
+			if !allowedLabels[pair[1]] {
+				t.Errorf("series %q carries label %q outside the bounded vocabulary", line, pair[1])
+			}
+		}
 	}
 
 	// Scraping is self-invisible: reserved paths bypass the middleware,

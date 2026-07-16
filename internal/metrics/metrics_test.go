@@ -32,10 +32,11 @@ func TestNewExposesExactlyFourFamilies(t *testing.T) {
 	}
 }
 
-// TestLabelNamesAreBounded is the structural pin on the cardinality
-// rule: every label name comes from the fixed {route, decision,
-// backend} vocabulary, so client identity (key, api_key, ip) can never
-// become a label without this test failing.
+// TestLabelNamesAreBounded pins the label vocabulary of every series
+// this package materializes itself. It cannot see a vec whose series
+// are only minted by live traffic (Gather skips childless vecs) - the
+// end-to-end scrape sweep in proxy's TestHandlerMetricsEndpoint closes
+// that gap.
 func TestLabelNamesAreBounded(t *testing.T) {
 	allowed := map[string]bool{"route": true, "decision": true, "backend": true}
 	m := New()

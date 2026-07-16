@@ -7,9 +7,13 @@
 # Not a scripts/demo_bypass.sh arm: the bypass measurement drives only
 # memory|redis and pins fail_closed on its redis arm for its own
 # reasons (see gateway-redis.yaml). Here on_error stays the degrade
-# default precisely because the fallback IS the story, and the quota
-# is small and per-second so a plain curl loop paints allow and deny
-# bands side by side.
+# default precisely because the fallback IS the story. rate 2/s keeps
+# denies visible in BOTH phases of the README's parallel hammer:
+# healthy, everything past the shared 2/s quota is denied; degraded,
+# the aggregate fallback quota is only replicas × 2/s, still far below
+# the hammer - a bigger rate would let the per-instance fallbacks
+# admit everything and hide the degraded deny band (a sequential curl
+# loop hides it the same way, from the other side).
 server:
   listen: ":8080"
 
@@ -24,5 +28,5 @@ routes:
     upstream: http://mock:9000
     limit:
       algorithm: fixed_window
-      rate: 5
+      rate: 2
       window: 1s

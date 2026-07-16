@@ -293,6 +293,36 @@ func TestRedisLimiterBackendFollowsWhoAnswered(t *testing.T) {
 	}
 }
 
+func TestRedisLimiterCanceledCallerSkipsFallback(t *testing.T) {
+	// A client hang-up mid-decision proves nothing about redis: the
+	// breaker holds it neutral, and the degrade path must too - a
+	// fallback answer would mint a degrade_* count and flip the
+	// backend gauge to memory on a perfectly healthy redis.
+	clock := &manualClock{t: time.Unix(1_000_000_000, 0)}
+	logger := slog.New(slog.DiscardHandler)
+	rec := &recordingBackend{}
+	f := &fakeScripter{err: context.Canceled}
+	l := &RedisLimiter{
+		scripter: f,
+		breaker:  newBreaker(clock, logger, nil),
+		fallback: NewMemoryLimiter(clock),
+		backend:  rec,
+		logger:   logger,
+	}
+	limit := config.Limit{Algorithm: config.AlgoFixedWindow, Rate: 5, Window: config.Duration(time.Minute)}
+
+	dec, err := l.Allow(context.Background(), "k", limit)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("err = %v, want the cancellation surfaced, not a fallback answer", err)
+	}
+	if dec.Degraded {
+		t.Error("Degraded = true for a canceled caller")
+	}
+	if len(rec.calls) != 0 {
+		t.Errorf("backend gauge calls = %v, want none - a hang-up must not paint a degrade flip", rec.calls)
+	}
+}
+
 func TestNewMarksConfiguredBackendActive(t *testing.T) {
 	logger := slog.New(slog.DiscardHandler)
 	clock := &manualClock{t: time.Unix(1_000_000_000, 0)}

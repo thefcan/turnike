@@ -14,6 +14,7 @@ package metrics
 
 import (
 	"net/http"
+	"sync"
 
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
@@ -74,10 +75,15 @@ type Metrics struct {
 	// memory backend, where no breaker exists.
 	BreakerState prometheus.Gauge
 	// LimiterBackend is a one-hot pair: 1 for the backend that
-	// answered the most recent rate-limit decision. Last decision
-	// wins - concurrent flips may interleave, so the pair is
-	// eventually one-hot, not atomically so.
+	// answered the most recent rate-limit decision. Flips are
+	// serialized by backendMu (last decision wins); a scrape may
+	// still catch a single flip between its two writes.
 	LimiterBackend *prometheus.GaugeVec
+
+	// backendMu serializes SetActiveBackend's pair of writes so
+	// concurrent flips cannot interleave into a lasting both-1 or
+	// both-0 state.
+	backendMu sync.Mutex
 }
 
 // New builds the instrument set on a fresh registry holding exactly
@@ -118,8 +124,10 @@ func New() *Metrics {
 			Namespace: "turnike",
 			Name:      "limiter_backend",
 			Help: "1 for the backend that answered the most recent rate-limit decision " +
-				"(redis flips to memory while the degrade fallback answers). Last decision " +
-				"wins: the pair is eventually one-hot, not atomically so.",
+				"(redis flips to memory while the degrade fallback answers; under " +
+				"fail_open/fail_closed nothing else answers, so it stays on redis - " +
+				"breaker_state carries those outages). Flips are serialized, last " +
+				"decision wins; a scrape may catch one mid-flip.",
 		}, []string{"backend"}),
 	}
 	m.Registry.MustRegister(m.RequestsTotal, m.RequestDuration, m.BreakerState, m.LimiterBackend)
@@ -137,10 +145,13 @@ func (m *Metrics) Handler() http.Handler {
 }
 
 // SetActiveBackend records which backend answered the most recent
-// decision. Both series go through here so a flip is one code path;
-// concurrent callers may interleave the two writes, which is why the
-// one-hot shape is "last decision wins", never a hard invariant.
+// decision. Both series go through here under backendMu, so racing
+// flips serialize and the last decision literally wins; the remaining
+// caveat is a scrape reading between the pair's two writes, which
+// resolves on the flip's completion.
 func (m *Metrics) SetActiveBackend(active string) {
+	m.backendMu.Lock()
+	defer m.backendMu.Unlock()
 	for _, b := range backends {
 		var v float64
 		if b == active {

@@ -157,7 +157,7 @@
       "id": 4,
       "type": "state-timeline",
       "title": "Active limiter backend per instance",
-      "description": "Which backend answered the instance's most recent rate-limit decision. The query reads the one-hot pair's memory series: 0 means redis is answering, 1 means the degrade fallback is (instance-local quota; over-admission bounded by replicas × limit).",
+      "description": "Which backend answered the instance's most recent rate-limit decision (the one-hot pair's memory series: 0 = redis, 1 = memory). Under a redis-backed config, memory means the degrade fallback is answering an instance-local quota (over-admission bounded by replicas × limit); under DEMO_BACKEND=memory it is simply the configured primary.",
       "gridPos": { "h": 8, "w": 12, "x": 12, "y": 9 },
       "datasource": { "type": "prometheus", "uid": "prometheus" },
       "fieldConfig": {
@@ -170,7 +170,7 @@
               "type": "value",
               "options": {
                 "0": { "text": "redis", "color": "green", "index": 0 },
-                "1": { "text": "memory (degraded)", "color": "orange", "index": 1 }
+                "1": { "text": "memory", "color": "blue", "index": 1 }
               }
             }
           ]

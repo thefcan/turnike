@@ -170,7 +170,13 @@ func (l *RedisLimiter) Allow(ctx context.Context, key string, limit config.Limit
 		return runErr
 	})
 	if err != nil {
-		if l.fallback != nil {
+		// A neutral error means the caller hung up mid-decision: it
+		// proves nothing about redis (the breaker holds it out of its
+		// failure count for the same reason) and any answer would be
+		// moot - the 499 path owns the request now. Skipping the
+		// fallback keeps a healthy dashboard free of hang-up-shaped
+		// degrade blips and backend flips.
+		if l.fallback != nil && !neutral(err) {
 			// degrade: per-instance approximate limiting while redis is
 			// unavailable. The headers stay real - they describe the
 			// instance-local quota - and over-admission is bounded by
