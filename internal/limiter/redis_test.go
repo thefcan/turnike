@@ -137,6 +137,9 @@ func TestRedisLimiterDeniedDecision(t *testing.T) {
 	if !dec.Reset.Equal(time.UnixMicro(resetUS)) {
 		t.Errorf("Reset = %v, want %v", dec.Reset, time.UnixMicro(resetUS))
 	}
+	if dec.Degraded {
+		t.Error("Degraded = true on redis's own verdict")
+	}
 }
 
 func TestRedisLimiterNoScriptFallsBackToEval(t *testing.T) {
@@ -232,12 +235,17 @@ func TestRedisLimiterDegradeFallsBackToMemory(t *testing.T) {
 	if !dec.Allowed || dec.Remaining != 1 {
 		t.Errorf("Decision = %+v, want allowed with Remaining 1 from a fresh memory bucket", dec)
 	}
-	// And the fallback enforces: the instance-local quota still denies.
-	if dec, _ := l.Allow(context.Background(), "k", limit); !dec.Allowed {
-		t.Fatalf("second request: %+v, want allowed (rate 2)", dec)
+	if !dec.Degraded {
+		t.Error("Degraded = false on a fallback answer; the caller cannot tell degrade happened")
 	}
-	if dec, _ := l.Allow(context.Background(), "k", limit); dec.Allowed {
-		t.Error("third request allowed: the degrade fallback is not limiting")
+	// And the fallback enforces: the instance-local quota still denies.
+	if dec, _ := l.Allow(context.Background(), "k", limit); !dec.Allowed || !dec.Degraded {
+		t.Fatalf("second request: %+v, want a degraded allow (rate 2)", dec)
+	}
+	// The denied fallback answer is degraded too - a redis outage must
+	// not erase 429s from the requests_total decision label.
+	if dec, _ := l.Allow(context.Background(), "k", limit); dec.Allowed || !dec.Degraded {
+		t.Errorf("third request: %+v, want a degraded deny from the fallback", dec)
 	}
 }
 

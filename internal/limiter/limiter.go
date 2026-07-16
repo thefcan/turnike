@@ -29,6 +29,13 @@ type Decision struct {
 	// RetryAfter is how long until the *next* request would succeed;
 	// meaningful only when Allowed is false — Retry-After.
 	RetryAfter time.Duration
+
+	// Degraded reports that this decision came from the degrade
+	// fallback rather than the configured backend. Observability only
+	// (it feeds the requests_total decision label); gateway behavior
+	// never branches on it, and the X-RateLimit-* headers stay the
+	// fallback's real, instance-local values.
+	Degraded bool
 }
 
 // Limiter decides whether a request identified by key is allowed under

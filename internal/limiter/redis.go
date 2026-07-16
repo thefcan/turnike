@@ -168,7 +168,12 @@ func (l *RedisLimiter) Allow(ctx context.Context, key string, limit config.Limit
 			// N_instances × limit. A residual fallback error (the
 			// maxKeys cap) propagates to the gateway's fail-open branch:
 			// redis, then memory, then open.
-			return l.fallback.Allow(ctx, key, limit)
+			dec, fbErr := l.fallback.Allow(ctx, key, limit)
+			if fbErr != nil {
+				return dec, fbErr
+			}
+			dec.Degraded = true
+			return dec, nil
 		}
 		return Decision{}, fmt.Errorf("limiter: redis %s: %w", limit.Algorithm, err)
 	}
