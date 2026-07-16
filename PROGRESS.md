@@ -19,31 +19,31 @@ update it before session end. Milestone definitions live in the build plan
       self-heal), Redis TIME µs clock, TTL'd keys, on_error policy
       (fail_open/fail_closed/degrade) + circuit breaker, per-algorithm
       hammers proving exact quotas across 4 clients × 100 goroutines
-- [ ] M4 — Multi-instance proof: nginx LB → 3 replicas demo compose,
-      scripts/demo_bypass.sh, bench/ raw outputs, README comparison table
+- [x] M4 — Multi-instance proof: demo compose (nginx round-robin → 3
+      replicas over one shared redis), scripts/demo_bypass.sh with
+      integrity/epoch/freshness guards, recorded runs in bench/ (memory
+      90/150 admitted vs redis exactly 30/150), README comparison table
 - [ ] M5 — Observability: Prometheus metrics, /metrics, Grafana dashboard
 - [ ] M6 — Benchmarks + README-as-design-doc, demo-video shot list
 - [ ] M7 — OPTIONAL deploy (Fly.io) — requires user approval first
 
 ## Next action
 
-Start **M4** (multi-instance proof): a demo compose file with nginx
-load-balancing 3 gateway replicas over one shared redis;
-scripts/demo_bypass.sh drives the same identity through the LB twice —
-once with `backend: memory` (each replica grants its own quota → up to
-3× the limit admitted: the bypass) and once with `backend: redis`
-(exactly the limit admitted) — raw outputs land in bench/, README gets
-the comparison table (numbers only from those runs). Building blocks in
-place: the key scheme is instance-agnostic and the identity fingerprint
-deterministic (same X-API-Key → same bucket on every replica),
-docker-compose.dev.yml's redis + healthcheck is the template, and
-serve()'s listener split + drain test keep rolling restarts honest.
-Mind the M1 edge-deployment note: behind nginx every client collapses
-to the LB address, so the demo must send X-API-Key (it should anyway —
-that's the story).
+Start **M5** (observability): Prometheus metrics, a /metrics endpoint,
+Grafana dashboard. internal/metrics/ is an empty placeholder package.
+Shape to decide with the advisor: the metric set (requests by
+route/status, limiter allow/deny by algorithm+backend, breaker state
+transitions, redis round-trip timing), /metrics served as a reserved
+path like /healthz + /readyz (GET/HEAD-only, outside the access log),
+and where prometheus + grafana containers live (extend the demo compose
+or a separate observability compose). **prometheus/client_golang would
+be a new dependency — CLAUDE.md says ask the user before adding it**
+(stdlib-only expvar/hand-rolled text format is the alternative to put
+in front of them).
 
-Advisor backlog: empty — #7 (drain proof) and #10 (health method guard
-+ readyz timeout) both landed in M3.
+Advisor backlog: empty — all M4 ship-review findings (stale-stack
+reuse, RUN INVALID marking, footer name resolution, measured total)
+landed in M4.
 
 ## Decisions
 
@@ -180,6 +180,43 @@ Advisor backlog: empty — #7 (drain proof) and #10 (health method guard
   would need hash-tagged keys) — documented in the README scope note.
 - Advisor reviews run pinned to the fable model (user instruction,
   2026-07-15) — `.claude/agents/advisor.md` frontmatter.
+- Demo compose isolation (M4): top-level `name: turnike-demo` — the dev
+  compose defaults to the directory-derived project name and both
+  define redis+mock, so without it the demo's up/down would recreate or
+  destroy the possibly-in-use dev containers. Only nginx publishes a
+  host port (8090; dev owns 6379/9000). `build:` lives on gateway-1
+  only; gateway-2/3 reuse the shared `turnike-gateway:demo` tag.
+- Demo failure policy (M4): the redis arm pins `on_error: fail_closed`,
+  not the degrade default — under degrade an unreachable redis silently
+  falls back to per-instance counting and would fake the very bypass
+  the demo disproves; fail_closed turns redis trouble into 503s (script
+  aborts) and is the one policy that puts the redis ping on /readyz, so
+  `up -d --wait` proves connectivity before a request fires. Failure
+  behavior only: the exactly-the-quota result does not depend on it.
+- Demo LB determinism (M4): `worker_processes 1` (OSS nginx keeps
+  round-robin state per worker), `max_fails=0`, `proxy_next_upstream
+  off` — a broken replica must surface as failed requests, never as
+  silent redistribution; `add_header X-Demo-Upstream $upstream_addr
+  always` (`always` because the default code list excludes 4xx and
+  denial attribution would vanish from 429s).
+- Demo window (M4): `fixed_window rate=30 window=1h` — 1h is in the
+  M3-blessed set where redis's epoch grid and memory's Go-zero grid
+  coincide, and the script waits out the top of the hour on redis's own
+  clock (the deciding clock; the Docker VM clock can drift from the
+  host's on macOS) so an arm can never straddle a window rollover.
+- demo_bypass.sh integrity (M4): assertions gate publication but check
+  invariants only — published numbers are whatever was measured. Redis
+  arm must admit exactly rate (M3's atomicity property, distribution-
+  independent); memory arm >rate and ≤ replicas×rate (exact 3× is an LB
+  property, not a limiter property — the recorded run did hit 90/150);
+  other==0; exactly 3 distinct upstreams; freshness canary (max
+  remaining seen == rate−1); measured line count == configured request
+  count. Every replica's boot log must show the intended
+  `limiter_backend` (a mis-set DEMO_BACKEND cannot mislabel an arm);
+  after the memory arm redis must hold no `turnike:*` keys; a failed
+  run appends `# RUN INVALID` and renames its raw file `*.failed`; the
+  commit stamp is captured once pre-run (arm 1 regenerating tracked
+  bench files would otherwise mislabel arm 2 as `-dirty`).
 
 ### Open (waiting on user)
 - M7 deploy (Fly.io + managed Redis): do it at all? Accounts/cost are the
@@ -253,3 +290,23 @@ Advisor backlog: empty — #7 (drain proof) and #10 (health method guard
   drain (exit 0). Field note: Docker Desktop's port forward turns
   stopped-container dials into ~1s timeouts rather than refusals — the
   1s client budgets + breaker absorbed it as designed.
+- **2026-07-17** — Session 5: M4 shipped in 7 commits, zero Go changes
+  (compose + nginx + bash + recorded measurements + docs). Advisor
+  consulted twice: (1) design pre-review — SOUND, six findings folded
+  in before a line was written (turnike-demo project isolation,
+  boot-log integrity guard, epoch-boundary guard as mandatory,
+  assert-invariants/report-measurements policy, no-silent-healing nginx
+  knobs, dir-mount for the demo configs); (2) milestone ship review —
+  FIX FIRST (1 moderate + 3 low), all fixed: leftover-stack reuse
+  (down-before-build + freshness canary), assertion-failed runs marked
+  RUN INVALID and renamed `*.failed`, footer upstreams resolved to
+  gateway-N names, `total=` counts data lines; plus one self-caught fix
+  (commit stamp captured once pre-run). Recorded run — three executions,
+  identical numbers: memory 90/150 admitted (strict 50/50/50 RR split,
+  each replica granting its own 30, three interleaved 29,29,29,28,…
+  countdowns, no `turnike:*` keys in redis afterwards), redis exactly
+  30/150 (seq 30 → 200 with remaining=0, seq 31 → 429), other=0 both
+  arms. Verified: dev-compose redis untouched by demo up/down cycles,
+  no leftover turnike-demo containers/volumes, `go test -race` + lint
+  green at every commit boundary. README gained the measured comparison
+  table; bench/REPORT.md cites the raw files line by line.
