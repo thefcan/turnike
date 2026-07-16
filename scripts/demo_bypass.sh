@@ -37,7 +37,28 @@ readonly DEMO_PATH=/demo/hello
 readonly API_KEY=demo-key
 
 dc() { docker compose -f "$COMPOSE_FILE" "$@"; }
-die() { echo "demo_bypass: $*" >&2; exit 1; }
+
+# die marks the current arm's raw file as unpublishable before exiting:
+# a run that failed an assertion must not leave behind a complete-looking
+# file that could be committed as a measurement.
+CURRENT_OUT=""
+die() {
+    if [ -n "$CURRENT_OUT" ] && [ -f "$CURRENT_OUT" ]; then
+        echo "# RUN INVALID: $*" >>"$CURRENT_OUT"
+        mv "$CURRENT_OUT" "$CURRENT_OUT.failed"
+        echo "demo_bypass: raw output marked invalid: $CURRENT_OUT.failed" >&2
+    fi
+    echo "demo_bypass: $*" >&2
+    exit 1
+}
+
+# replica_addr prints the in-network address of gateway-<n> in the form
+# nginx's $upstream_addr reports it.
+replica_addr() {
+    local cid
+    cid=$(dc ps -q "gateway-$1")
+    printf '%s:8080\n' "$(docker inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' "$cid")"
+}
 
 # --- preflight -------------------------------------------------------
 docker compose version >/dev/null 2>&1 || die "docker compose v2 is required"
@@ -52,13 +73,26 @@ awk -v v="$curl_ver" 'BEGIN {
 trap 'dc down --volumes --remove-orphans >/dev/null 2>&1 || true' EXIT
 
 mkdir -p bench
+
+# Commit stamp captured once, before the run overwrites its own tracked
+# outputs in bench/ - arm 1's regenerated file would otherwise mislabel
+# arm 2 as -dirty.
+COMMIT=$(git describe --always --dirty 2>/dev/null || echo unknown)
+readonly COMMIT
+
+# Start from nothing: `up -d --wait` happily reuses a leftover stack (a
+# SIGKILLed run, a manual up) whose warm in-memory counters would
+# publish a wrong memory-arm number that still passes the interval
+# assertion below.
+dc down --volumes --remove-orphans >/dev/null 2>&1 || true
+
 echo "demo_bypass: building images..."
 dc build
 
 run_arm() {
     local backend=$1
     local out=bench/demo_bypass_${backend}.txt
-    local i cid ip logs line commit now rem
+    local i logs line now rem addr1 addr2 addr3
 
     echo "=== arm: backend=$backend ==="
     DEMO_BACKEND=$backend dc up -d --wait
@@ -101,23 +135,25 @@ run_arm() {
         sleep $((rem + 1))
     fi
 
-    commit=$(git describe --always --dirty 2>/dev/null || echo unknown)
+    # X-Demo-Upstream records only the replica's IP, and the IP ->
+    # service mapping dies with the containers at down - so pin it in
+    # the raw file header and resolve it in the footer while they live.
+    addr1=$(replica_addr 1)
+    addr2=$(replica_addr 2)
+    addr3=$(replica_addr 3)
+
     {
         echo "# turnike demo_bypass - backend: $backend"
         echo "# date: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
-        echo "# commit: $commit"
+        echo "# commit: $COMMIT"
         echo "# topology: client -> nginx (round-robin, 1 worker) -> gateway-{1,2,3} -> mock; one shared redis"
         echo "# route: /demo/ fixed_window rate=$RATE window=1h; identity: X-API-Key: $API_KEY; requests=$REQUESTS, sequential"
-        # X-Demo-Upstream records only the replica's IP, and the IP ->
-        # service mapping dies with the containers at down - so pin it
-        # in the raw file while they are alive.
-        for i in 1 2 3; do
-            cid=$(dc ps -q "gateway-$i")
-            ip=$(docker inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' "$cid")
-            echo "# replica gateway-$i: $ip:8080"
-        done
+        echo "# replica gateway-1: $addr1"
+        echo "# replica gateway-2: $addr2"
+        echo "# replica gateway-3: $addr3"
         echo "# columns: seq|status|x-ratelimit-remaining|upstream"
     } >"$out"
+    CURRENT_OUT=$out
 
     echo "firing $REQUESTS requests..."
     for i in $(seq 1 "$REQUESTS"); do
@@ -137,22 +173,34 @@ run_arm() {
         echo "# redis keys matching turnike:* after run: none" >>"$out"
     fi
 
-    local allowed denied other distinct
+    local total allowed denied other distinct maxrem
+    total=$(awk -F'|' '!/^#/ { n++ } END { print n + 0 }' "$out")
     allowed=$(awk -F'|' '!/^#/ && $2 == 200 { n++ } END { print n + 0 }' "$out")
     denied=$(awk -F'|' '!/^#/ && $2 == 429 { n++ } END { print n + 0 }' "$out")
-    other=$((REQUESTS - allowed - denied))
+    other=$((total - allowed - denied))
     distinct=$(awk -F'|' '!/^#/ { u[$4] } END { n = 0; for (k in u) n++; print n }' "$out")
+    maxrem=$(awk -F'|' '!/^#/ && $3 != "" { if ($3 + 0 > m) m = $3 + 0 } END { print m + 0 }' "$out")
     {
-        echo "# summary: total=$REQUESTS 200=$allowed 429=$denied other=$other"
-        awk -F'|' '!/^#/ { r[$4]++; if ($2 == 200) a[$4]++ }
-            END { for (u in r) printf "# upstream %s: requests=%d 200=%d\n", u, r[u], a[u] + 0 }' \
+        echo "# summary: total=$total 200=$allowed 429=$denied other=$other"
+        awk -F'|' -v a1="$addr1" -v a2="$addr2" -v a3="$addr3" '
+            function name(u) {
+                return u == a1 ? "gateway-1" : (u == a2 ? "gateway-2" : (u == a3 ? "gateway-3" : "unknown"))
+            }
+            !/^#/ { r[$4]++; if ($2 == 200) a[$4]++ }
+            END { for (u in r) printf "# upstream %s (%s): requests=%d 200=%d\n", name(u), u, r[u], a[u] + 0 }' \
             "$out" | sort
     } >>"$out"
 
     dc down --volumes --remove-orphans
 
+    [ "$total" -eq "$REQUESTS" ] || die "$backend arm: $total data lines, want $REQUESTS (see $out)"
     [ "$other" -eq 0 ] || die "$backend arm: $other unexpected statuses (see $out)"
     [ "$distinct" -eq "$REPLICAS" ] || die "$backend arm: $distinct distinct upstreams, want $REPLICAS (see $out)"
+    # Freshness canary: the first request each counter ever sees must
+    # report a full quota. Catches any warm-state path the
+    # down-before-build belt misses.
+    [ "$maxrem" -eq $((RATE - 1)) ] ||
+        die "$backend arm: max remaining seen is $maxrem, want $((RATE - 1)) - counters were not fresh (see $out)"
     case $backend in
     redis)
         [ "$allowed" -eq "$RATE" ] ||
@@ -163,6 +211,7 @@ run_arm() {
             die "memory arm admitted $allowed, want >$RATE and <=$((REPLICAS * RATE)) - bypass not visible (see $out)"
         ;;
     esac
+    CURRENT_OUT=""
 
     echo "$backend: $allowed/$REQUESTS admitted, $denied denied, $distinct replicas -> $out"
 }
