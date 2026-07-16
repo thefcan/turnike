@@ -1,0 +1,28 @@
+# Observability drill arm: DEMO_BACKEND=degrade selects this config so
+# the provisioned Grafana dashboard can show the failure story live -
+# `docker compose stop redis` flips every replica to its in-memory
+# fallback (degrade_* decision rates, breaker Open, backend memory),
+# `start redis` shows the probe-driven recovery.
+#
+# Not a scripts/demo_bypass.sh arm: the bypass measurement drives only
+# memory|redis and pins fail_closed on its redis arm for its own
+# reasons (see gateway-redis.yaml). Here on_error stays the degrade
+# default precisely because the fallback IS the story, and the quota
+# is small and per-second so a plain curl loop paints allow and deny
+# bands side by side.
+server:
+  listen: ":8080"
+
+limiter:
+  backend: redis
+  redis:
+    addr: redis:6379
+    on_error: degrade
+
+routes:
+  - prefix: /demo/
+    upstream: http://mock:9000
+    limit:
+      algorithm: fixed_window
+      rate: 5
+      window: 1s

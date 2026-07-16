@@ -1,0 +1,13 @@
+# File provider: every JSON under /var/lib/grafana/dashboards (a
+# read-only bind mount of demo/grafana/dashboards) is loaded at boot.
+# The JSON in git is the editor - anonymous viewers cannot save over a
+# provisioned dashboard.
+apiVersion: 1
+
+providers:
+  - name: turnike
+    type: file
+    disableDeletion: true
+    updateIntervalSeconds: 30
+    options:
+      path: /var/lib/grafana/dashboards

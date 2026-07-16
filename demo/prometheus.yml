@@ -1,0 +1,15 @@
+# Demo-scale scrape. The breaker cooldown is 1s, so a coarser interval
+# would miss whole open/close cycles; even at 1s the half-open state
+# usually lives shorter than one interval (a single probe call) - it
+# is pinned by unit tests, the dashboard mostly shows closed/open.
+global:
+  scrape_interval: 1s
+  scrape_timeout: 1s # must not exceed the interval
+
+scrape_configs:
+  - job_name: turnike
+    # Straight at the replicas, not through nginx: per-instance series
+    # need per-instance targets, and scrape traffic must not consume
+    # round-robin picks during a measured demo run.
+    static_configs:
+      - targets: ["gateway-1:8080", "gateway-2:8080", "gateway-3:8080"]

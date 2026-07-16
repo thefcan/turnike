@@ -1,0 +1,16 @@
+# Provisioned datasource. The uid is pinned: every panel in
+# dashboards/turnike.json references datasource uid "prometheus", so
+# renaming it here breaks the provisioned dashboard.
+apiVersion: 1
+
+datasources:
+  - name: Prometheus
+    type: prometheus
+    uid: prometheus
+    access: proxy
+    url: http://prometheus:9090
+    isDefault: true
+    jsonData:
+      # Matches prometheus.yml's scrape_interval so $__rate_interval
+      # resolves against the real sample spacing.
+      timeInterval: 1s

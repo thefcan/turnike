@@ -1,13 +1,19 @@
-# M4 demo: nginx round-robin across 3 gateway replicas over ONE redis.
+# Demo: nginx round-robin across 3 gateway replicas over ONE redis
+# (M4), with prometheus + grafana provisioned on top (M5).
 #
-# DEMO_BACKEND (memory|redis, default redis) selects which demo/ config
-# every replica loads; scripts/demo_bypass.sh drives both arms and is
-# the intended entry point (`make demo`).
+# DEMO_BACKEND (memory|redis|degrade, default redis) selects which
+# demo/ config every replica loads. scripts/demo_bypass.sh drives the
+# memory and redis arms (`make demo`); DEMO_BACKEND=degrade is the
+# observability drill - stop/start redis and watch the provisioned
+# dashboard at http://localhost:3300.
 #
 # The project name is distinct from the dev compose (which defaults to
 # the directory name, "turnike") so `down` here can never touch the
-# possibly-in-use dev redis/mock. Nothing but nginx publishes a host
-# port for the same reason: the dev compose owns 6379 and 9000.
+# possibly-in-use dev redis/mock. Published ports avoid everything the
+# dev compose owns (6379, 9000): nginx 8090, prometheus 9090, and
+# grafana on 3300 rather than its native 3000 - the single most
+# commonly dev-occupied port, and a clash would wedge `up --wait` for
+# the measured M4 runs too.
 name: turnike-demo
 
 # Common replica block. Only gateway-1 carries `build:` — the shared
@@ -74,7 +80,7 @@ services:
     volumes:
       - ./demo/nginx.conf:/etc/nginx/nginx.conf:ro
     ports:
-      - "8090:8080" # the demo's only published port
+      - "8090:8080"
     depends_on:
       gateway-1:
         condition: service_healthy
@@ -85,3 +91,32 @@ services:
     # Deliberately no healthcheck: a check routed through nginx would
     # consume round-robin picks during the measured run. The script's
     # warmup loop covers the "running but not yet accepting" race.
+
+  # The observability pair carries no healthchecks on purpose: `up -d
+  # --wait` treats healthcheck-less services as ready-when-running, so
+  # a slow grafana boot can never wedge or delay a demo_bypass.sh
+  # measurement. Both are provisioned from read-only bind mounts under
+  # demo/, never named volumes - the teardown is `down --volumes`, and
+  # wiping their state between runs is exactly the same-panels-for-
+  # everyone guarantee.
+  prometheus:
+    image: prom/prometheus:v3.5.5
+    volumes:
+      - ./demo/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+    ports:
+      - "9090:9090"
+
+  grafana:
+    image: grafana/grafana:12.4.5
+    environment:
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Viewer
+      GF_AUTH_DISABLE_LOGIN_FORM: "true"
+      GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH: /var/lib/grafana/dashboards/turnike.json
+    volumes:
+      - ./demo/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./demo/grafana/dashboards:/var/lib/grafana/dashboards:ro
+    ports:
+      - "3300:3000"
+    depends_on:
+      - prometheus
