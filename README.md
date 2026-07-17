@@ -53,7 +53,7 @@ in miniature — every box below is a container in the compose file:
 
 ```mermaid
 flowchart LR
-    client([client / k6]) --> nginx["nginx<br/>round-robin, 1 worker"]
+    client(["client / k6"]) --> nginx["nginx<br/>round-robin, 1 worker"]
     nginx --> g1["gateway-1"]
     nginx --> g2["gateway-2"]
     nginx --> g3["gateway-3"]
