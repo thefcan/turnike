@@ -1,6 +1,6 @@
 BIN_DIR := bin
 
-.PHONY: build test test-integration lint run tidy demo
+.PHONY: build test test-integration lint run tidy demo load
 
 build:
 	go build -o $(BIN_DIR)/gateway ./cmd/gateway
@@ -29,3 +29,8 @@ tidy:
 # images, drives both arms through nginx, writes bench/demo_bypass_*.txt.
 demo:
 	./scripts/demo_bypass.sh
+
+# Runs the M6 k6 latency & admission matrix (9 recorded runs) against
+# the demo topology, writes raw outputs to bench/load/.
+load:
+	./scripts/load_test.sh

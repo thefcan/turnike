@@ -1,0 +1,76 @@
+# Load arm (M6): the k6 latency/admission runs. Selected with
+# DEMO_BACKEND=load; driven by scripts/load_test.sh, never by
+# scripts/demo_bypass.sh.
+#
+# on_error: fail_closed for the same reason the bypass arm pins it:
+# mid-run redis trouble must surface as 503s that fail the run's
+# status assertion loudly, not silently degrade into memory-path
+# latencies that would pollute the published percentiles. It changes
+# failure behavior only.
+#
+# Two route families, one per k6 scenario shape; keys are
+# route-namespaced so the idle family cannot interfere with the one
+# under load, and each recorded run starts from a fresh stack anyway.
+#
+# - /fixed/ /token/ /sliding/: the sustained-latency routes. Quota is
+#   set far above any arrival rate the rig can produce so nothing is
+#   denied and the label-less histogram measures the pure allow path
+#   (identity -> route -> decision -> proxy -> mock). window 1s keeps
+#   sliding_window's zset at ~arrival-rate members: the SMALL end of
+#   its O(admitted-per-window) state - bench/REPORT.md says so.
+#
+# - /burst-*/: the admission-semantics routes. One tight quota
+#   (rate 50 per 10s; token_bucket capacity 50, refilling 5/s) hit by
+#   an identical ~6s spike timed to straddle a 10s epoch-grid
+#   boundary, so the three algorithms' different answers to the same
+#   burst are measured, not asserted in prose: fixed_window admits up
+#   to 2x across the boundary, sliding_window admits exactly rate,
+#   token_bucket admits burst plus continuous refill.
+server:
+  listen: ":8080"
+
+limiter:
+  backend: redis
+  redis:
+    addr: redis:6379
+    on_error: fail_closed
+
+routes:
+  - prefix: /fixed/
+    upstream: http://mock:9000
+    limit:
+      algorithm: fixed_window
+      rate: 100000
+      window: 1s
+  - prefix: /token/
+    upstream: http://mock:9000
+    limit:
+      algorithm: token_bucket
+      rate: 100000
+      window: 1s
+      burst: 100000
+  - prefix: /sliding/
+    upstream: http://mock:9000
+    limit:
+      algorithm: sliding_window
+      rate: 100000
+      window: 1s
+  - prefix: /burst-fixed/
+    upstream: http://mock:9000
+    limit:
+      algorithm: fixed_window
+      rate: 50
+      window: 10s
+  - prefix: /burst-token/
+    upstream: http://mock:9000
+    limit:
+      algorithm: token_bucket
+      rate: 50
+      window: 10s
+      burst: 50
+  - prefix: /burst-sliding/
+    upstream: http://mock:9000
+    limit:
+      algorithm: sliding_window
+      rate: 50
+      window: 10s

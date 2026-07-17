@@ -1,0 +1,35 @@
+# Load baseline arm (M6): identical to gateway-load.yaml's sustained
+# routes except the limiter block - backend memory, so the decision
+# never leaves the process. The redis-vs-memory delta per algorithm is
+# the measured price of one shared-state round trip.
+#
+# No /burst-*/ routes: the burst scenario measures admission SEMANTICS
+# under the shared-counter deployment story, which is redis's job; a
+# per-instance memory quota behind round-robin would measure the LB
+# split, not the algorithm.
+server:
+  listen: ":8080"
+
+limiter:
+  backend: memory
+
+routes:
+  - prefix: /fixed/
+    upstream: http://mock:9000
+    limit:
+      algorithm: fixed_window
+      rate: 100000
+      window: 1s
+  - prefix: /token/
+    upstream: http://mock:9000
+    limit:
+      algorithm: token_bucket
+      rate: 100000
+      window: 1s
+      burst: 100000
+  - prefix: /sliding/
+    upstream: http://mock:9000
+    limit:
+      algorithm: sliding_window
+      rate: 100000
+      window: 1s
