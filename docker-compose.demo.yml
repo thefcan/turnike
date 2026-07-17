@@ -1,11 +1,12 @@
 # Demo: nginx round-robin across 3 gateway replicas over ONE redis
 # (M4), with prometheus + grafana provisioned on top (M5).
 #
-# DEMO_BACKEND (memory|redis|degrade, default redis) selects which
-# demo/ config every replica loads. scripts/demo_bypass.sh drives the
-# memory and redis arms (`make demo`); DEMO_BACKEND=degrade is the
-# observability drill - stop/start redis and watch the provisioned
-# dashboard at http://localhost:3300.
+# DEMO_BACKEND (memory|redis|degrade|load|load-memory, default redis)
+# selects which demo/ config every replica loads. scripts/demo_bypass.sh
+# drives the memory and redis arms (`make demo`); DEMO_BACKEND=degrade is
+# the observability drill - stop/start redis and watch the provisioned
+# dashboard at http://localhost:3300; the load/load-memory arms are the
+# M6 k6 latency & admission runs (scripts/load_test.sh, `make load`).
 #
 # The project name is distinct from the dev compose (which defaults to
 # the directory name, "turnike") so `down` here can never touch the

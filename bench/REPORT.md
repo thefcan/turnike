@@ -170,7 +170,7 @@ fail_closed`. Source: `bench/load/burst_*_redis.meta.txt`.
 - **Every replica saw an even third of the load and the histogram caught
   all of it.** Per-run, the three replicas' histogram `_count`s split
   evenly — 4000/4001/4000 summing to 12,001 (4002/4003/4002 → 12,007 for
-  fixed_window/redis) sustained, 600/601/600 → 1801 burst — matching
-  k6's `http_reqs` exactly. That equality is an asserted invariant of
+  fixed_window/redis) sustained, 600/601/600 → 1801 burst (600/600/600 →
+  1800 for sliding_window) — matching k6's `http_reqs` exactly. That equality is an asserted invariant of
   every run: no request went unmeasured or unaccounted, and no foreign
   traffic (metric scrapes, health checks) polluted the histogram.

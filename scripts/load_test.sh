@@ -300,7 +300,7 @@ run_load() {
         --network "$NETWORK" \
         -v "$PWD/scripts/k6:/scripts:ro" \
         -v "$PWD/$OUT_DIR:/out" \
-        -e BASE_URL="$BASE_URL" -e ROUTE="$route" -e SCENARIO="$scenario" \
+        -e BASE_URL="$BASE_URL" -e ROUTE="$route" \
         -e RATE="$rate" -e DURATION="${duration_s}s" -e START_EPOCH_S="$start_epoch" \
         -e NAME="$name" -e API_KEY="$API_KEY" -e PRE_VUS="$PRE_VUS" -e MAX_VUS="$MAX_VUS" \
         "$K6_IMAGE" run --quiet /scripts/load.js >"$k6log" 2>&1 ||

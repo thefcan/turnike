@@ -214,11 +214,12 @@ median: the gateway's own label-less histogram sits at (0.5, 1] ms for
 all three algorithms on redis and (0, 0.5] ms on memory, so the
 redis-vs-memory delta at the median — read from that same histogram so
 the upstream time cancels out — is about 0.3 ms, the price of one
-shared-state round trip. The tails move run to run (p95 a few ms, p99
-anywhere from ~5 to ~25 ms across the redis runs, no algorithm
-consistently worst); on a single-VM laptop rig they measure scheduling
-noise more than algorithm structure, so REPORT.md keeps them as bucket
-bounds rather than pretending to a stable p99. Numbers are for
+shared-state round trip. The tails move run to run (gateway-side p95 a
+few ms, p99 anywhere from ~5 to ~25 ms across the redis runs, no
+algorithm consistently worst; k6's client-side p99 ranges wider still,
+to ~48 ms); on a single-VM laptop rig they measure scheduling noise
+more than algorithm structure, so REPORT.md keeps them as bucket bounds
+rather than pretending to a stable p99. Numbers are for
 relative comparison on this rig; absolute capacity claims are exactly
 what they would be worth. One structural note the small-N runs
 deliberately don't exercise: sliding_window's log holds one member per

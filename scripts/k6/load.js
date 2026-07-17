@@ -1,14 +1,15 @@
 // load.js — the one parameterized k6 scenario for scripts/load_test.sh.
 //
-// Two shapes, selected by SCENARIO:
-//   sustained — constant arrival RATE for DURATION against a route whose
-//               quota is far above arrival: nothing is denied, so the
-//               percentiles measure the pure allow path.
-//   burst     — same executor, but setup() first busy-waits until
-//               START_EPOCH_S on this container's clock (the same VM
-//               kernel clock redis TIME reads, so the wait is on the
-//               clock that decides windows); the shell computes that
-//               instant from redis TIME so the ~6s burst straddles a
+// Two shapes, distinguished by whether START_EPOCH_S is set:
+//   sustained (START_EPOCH_S=0) — constant arrival RATE for DURATION
+//               against a route whose quota is far above arrival:
+//               nothing is denied, so the percentiles measure the pure
+//               allow path.
+//   burst (START_EPOCH_S>0) — same executor, but setup() first
+//               busy-waits until START_EPOCH_S on this container's clock
+//               (the same VM kernel clock redis TIME reads, so the wait
+//               is on the clock that decides windows); the shell computes
+//               that instant from redis TIME so the ~6s burst straddles a
 //               fixed_window epoch-grid boundary.
 //
 // Numbers discipline: this script never aggregates away anything —
