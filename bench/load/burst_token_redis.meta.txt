@@ -1,0 +1,20 @@
+# turnike load_test - run: burst_token_redis
+# date: 2026-07-17T07:48:08Z
+# commit: f2ba13d
+# rig: docker NCPU=8 mem_bytes=8217731072 macos=26.5.2 (laptop; numbers are for relative comparison on this rig)
+# load generator: grafana/k6:2.1.0 (grafana/k6@sha256:65c920dc067d5e2e00befbf982af6ad6ad0117034e8b1c65817c7975c52d4669; k6 v2.1.0 (commit/83a87a41e2, go1.26.4, linux/arm64)), in-network (docker run --network turnike-demo_default) -> http://nginx:8080
+# topology: k6 -> nginx (round-robin, 1 worker, no upstream keepalive) -> gateway-{1,2,3} -> mock; one shared redis
+# arm: DEMO_BACKEND=load (limiter backend=redis, on_error=fail_closed)
+# route: /burst-token/ token_bucket (quota in demo/gateway-load.yaml at the stamped commit); identity: X-API-Key: load-key (single key -> single quota)
+# scenario: burst arrival=300/s duration=6s preVUs=60 maxVUs=100 start_epoch_s=1784274497
+# files: burst_token_redis.summary.json (k6 end-of-test summary), burst_token_redis.metrics.txt (per-replica /metrics scrape)
+measured: http_reqs=1801 status_200=79 status_429=1722 other=0 dropped_iterations=0
+k6 http_req_duration ms: avg=1.32854354469739 min=0.4075 med=0.806291 p90=1.935 p95=2.548875 p99=11.385792 max=38.840291
+gateway histogram (replicas summed): count=1801
+gateway q=0.50 lo=0 hi=0.0005 interp=0.000280 total=1801
+gateway q=0.95 lo=0.0005 hi=0.001 interp=0.000927 total=1801
+gateway q=0.99 lo=0.0025 hi=0.005 interp=0.003748 total=1801
+per-replica histogram _count: gateway-1=600 gateway-2=601 gateway-3=600
+decisions /burst-token/: allow=79 deny=1722 degrade_allow=0 degrade_deny=0 degrade=0
+# scenario_start name=burst_token_redis target_epoch_s=1784274497 actual_start_ms=1784274497018
+# assertions: PASS

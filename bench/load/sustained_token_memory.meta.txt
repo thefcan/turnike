@@ -1,0 +1,19 @@
+# turnike load_test - run: sustained_token_memory
+# date: 2026-07-17T07:45:03Z
+# commit: f2ba13d
+# rig: docker NCPU=8 mem_bytes=8217731072 macos=26.5.2 (laptop; numbers are for relative comparison on this rig)
+# load generator: grafana/k6:2.1.0 (grafana/k6@sha256:65c920dc067d5e2e00befbf982af6ad6ad0117034e8b1c65817c7975c52d4669; k6 v2.1.0 (commit/83a87a41e2, go1.26.4, linux/arm64)), in-network (docker run --network turnike-demo_default) -> http://nginx:8080
+# topology: k6 -> nginx (round-robin, 1 worker, no upstream keepalive) -> gateway-{1,2,3} -> mock; one shared redis
+# arm: DEMO_BACKEND=load-memory (limiter backend=memory)
+# route: /token/ token_bucket (quota in demo/gateway-load-memory.yaml at the stamped commit); identity: X-API-Key: load-key (single key -> single quota)
+# scenario: sustained arrival=200/s duration=60s preVUs=60 maxVUs=100 start_epoch_s=0
+# files: sustained_token_memory.summary.json (k6 end-of-test summary), sustained_token_memory.metrics.txt (per-replica /metrics scrape)
+measured: http_reqs=12001 status_200=12001 status_429=0 other=0 dropped_iterations=0
+k6 http_req_duration ms: avg=1.5821935216232021 min=0.386083 med=1.193458 p90=2.567833 p95=3.159625 p99=6.867125 max=109.205751
+gateway histogram (replicas summed): count=12001
+gateway q=0.50 lo=0 hi=0.0005 interp=0.000333 total=12001
+gateway q=0.95 lo=0.0005 hi=0.001 interp=0.000999 total=12001
+gateway q=0.99 lo=0.001 hi=0.0025 interp=0.002419 total=12001
+per-replica histogram _count: gateway-1=4000 gateway-2=4001 gateway-3=4000
+decisions /token/: allow=12001 deny=0 degrade_allow=0 degrade_deny=0 degrade=0
+# assertions: PASS

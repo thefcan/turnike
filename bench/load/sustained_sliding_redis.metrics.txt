@@ -1,0 +1,177 @@
+# === gateway-1 /metrics ===
+# HELP turnike_breaker_state Redis circuit breaker state: 0=closed, 1=open, 2=half-open. Constant 0 under the memory backend, where no breaker exists.
+# TYPE turnike_breaker_state gauge
+turnike_breaker_state 0
+# HELP turnike_limiter_backend 1 for the backend that answered the most recent rate-limit decision (redis flips to memory while the degrade fallback answers; under fail_open/fail_closed nothing else answers, so it stays on redis - breaker_state carries those outages). Flips are serialized, last decision wins; a scrape may catch one mid-flip.
+# TYPE turnike_limiter_backend gauge
+turnike_limiter_backend{backend="memory"} 0
+turnike_limiter_backend{backend="redis"} 1
+# HELP turnike_request_duration_seconds Gateway answer duration in seconds for routed requests, all outcomes: allowed answers include upstream time, denials return without proxying.
+# TYPE turnike_request_duration_seconds histogram
+turnike_request_duration_seconds_bucket{le="0.0005"} 1371
+turnike_request_duration_seconds_bucket{le="0.001"} 3374
+turnike_request_duration_seconds_bucket{le="0.0025"} 3857
+turnike_request_duration_seconds_bucket{le="0.005"} 3912
+turnike_request_duration_seconds_bucket{le="0.01"} 3949
+turnike_request_duration_seconds_bucket{le="0.025"} 3990
+turnike_request_duration_seconds_bucket{le="0.05"} 3999
+turnike_request_duration_seconds_bucket{le="0.1"} 4000
+turnike_request_duration_seconds_bucket{le="0.25"} 4000
+turnike_request_duration_seconds_bucket{le="0.5"} 4000
+turnike_request_duration_seconds_bucket{le="1"} 4000
+turnike_request_duration_seconds_bucket{le="2.5"} 4000
+turnike_request_duration_seconds_bucket{le="5"} 4000
+turnike_request_duration_seconds_bucket{le="10"} 4000
+turnike_request_duration_seconds_bucket{le="+Inf"} 4000
+turnike_request_duration_seconds_sum 4.072332552999993
+turnike_request_duration_seconds_count 4000
+# HELP turnike_requests_total Requests that reached the rate-limit decision point, by configured route prefix and decision. allow/deny are the configured backend's own verdict; degrade_allow/degrade_deny are the degrade fallback's verdict; degrade means no verdict existed (fail_open pass-through or fail_closed 503). Unrouted and reserved paths are not counted.
+# TYPE turnike_requests_total counter
+turnike_requests_total{decision="allow",route="/burst-fixed/"} 0
+turnike_requests_total{decision="allow",route="/burst-sliding/"} 0
+turnike_requests_total{decision="allow",route="/burst-token/"} 0
+turnike_requests_total{decision="allow",route="/fixed/"} 0
+turnike_requests_total{decision="allow",route="/sliding/"} 4000
+turnike_requests_total{decision="allow",route="/token/"} 0
+turnike_requests_total{decision="degrade",route="/burst-fixed/"} 0
+turnike_requests_total{decision="degrade",route="/burst-sliding/"} 0
+turnike_requests_total{decision="degrade",route="/burst-token/"} 0
+turnike_requests_total{decision="degrade",route="/fixed/"} 0
+turnike_requests_total{decision="degrade",route="/sliding/"} 0
+turnike_requests_total{decision="degrade",route="/token/"} 0
+turnike_requests_total{decision="degrade_allow",route="/burst-fixed/"} 0
+turnike_requests_total{decision="degrade_allow",route="/burst-sliding/"} 0
+turnike_requests_total{decision="degrade_allow",route="/burst-token/"} 0
+turnike_requests_total{decision="degrade_allow",route="/fixed/"} 0
+turnike_requests_total{decision="degrade_allow",route="/sliding/"} 0
+turnike_requests_total{decision="degrade_allow",route="/token/"} 0
+turnike_requests_total{decision="degrade_deny",route="/burst-fixed/"} 0
+turnike_requests_total{decision="degrade_deny",route="/burst-sliding/"} 0
+turnike_requests_total{decision="degrade_deny",route="/burst-token/"} 0
+turnike_requests_total{decision="degrade_deny",route="/fixed/"} 0
+turnike_requests_total{decision="degrade_deny",route="/sliding/"} 0
+turnike_requests_total{decision="degrade_deny",route="/token/"} 0
+turnike_requests_total{decision="deny",route="/burst-fixed/"} 0
+turnike_requests_total{decision="deny",route="/burst-sliding/"} 0
+turnike_requests_total{decision="deny",route="/burst-token/"} 0
+turnike_requests_total{decision="deny",route="/fixed/"} 0
+turnike_requests_total{decision="deny",route="/sliding/"} 0
+turnike_requests_total{decision="deny",route="/token/"} 0
+# === gateway-2 /metrics ===
+# HELP turnike_breaker_state Redis circuit breaker state: 0=closed, 1=open, 2=half-open. Constant 0 under the memory backend, where no breaker exists.
+# TYPE turnike_breaker_state gauge
+turnike_breaker_state 0
+# HELP turnike_limiter_backend 1 for the backend that answered the most recent rate-limit decision (redis flips to memory while the degrade fallback answers; under fail_open/fail_closed nothing else answers, so it stays on redis - breaker_state carries those outages). Flips are serialized, last decision wins; a scrape may catch one mid-flip.
+# TYPE turnike_limiter_backend gauge
+turnike_limiter_backend{backend="memory"} 0
+turnike_limiter_backend{backend="redis"} 1
+# HELP turnike_request_duration_seconds Gateway answer duration in seconds for routed requests, all outcomes: allowed answers include upstream time, denials return without proxying.
+# TYPE turnike_request_duration_seconds histogram
+turnike_request_duration_seconds_bucket{le="0.0005"} 1389
+turnike_request_duration_seconds_bucket{le="0.001"} 3402
+turnike_request_duration_seconds_bucket{le="0.0025"} 3856
+turnike_request_duration_seconds_bucket{le="0.005"} 3931
+turnike_request_duration_seconds_bucket{le="0.01"} 3960
+turnike_request_duration_seconds_bucket{le="0.025"} 3992
+turnike_request_duration_seconds_bucket{le="0.05"} 4000
+turnike_request_duration_seconds_bucket{le="0.1"} 4001
+turnike_request_duration_seconds_bucket{le="0.25"} 4001
+turnike_request_duration_seconds_bucket{le="0.5"} 4001
+turnike_request_duration_seconds_bucket{le="1"} 4001
+turnike_request_duration_seconds_bucket{le="2.5"} 4001
+turnike_request_duration_seconds_bucket{le="5"} 4001
+turnike_request_duration_seconds_bucket{le="10"} 4001
+turnike_request_duration_seconds_bucket{le="+Inf"} 4001
+turnike_request_duration_seconds_sum 3.875987830999988
+turnike_request_duration_seconds_count 4001
+# HELP turnike_requests_total Requests that reached the rate-limit decision point, by configured route prefix and decision. allow/deny are the configured backend's own verdict; degrade_allow/degrade_deny are the degrade fallback's verdict; degrade means no verdict existed (fail_open pass-through or fail_closed 503). Unrouted and reserved paths are not counted.
+# TYPE turnike_requests_total counter
+turnike_requests_total{decision="allow",route="/burst-fixed/"} 0
+turnike_requests_total{decision="allow",route="/burst-sliding/"} 0
+turnike_requests_total{decision="allow",route="/burst-token/"} 0
+turnike_requests_total{decision="allow",route="/fixed/"} 0
+turnike_requests_total{decision="allow",route="/sliding/"} 4001
+turnike_requests_total{decision="allow",route="/token/"} 0
+turnike_requests_total{decision="degrade",route="/burst-fixed/"} 0
+turnike_requests_total{decision="degrade",route="/burst-sliding/"} 0
+turnike_requests_total{decision="degrade",route="/burst-token/"} 0
+turnike_requests_total{decision="degrade",route="/fixed/"} 0
+turnike_requests_total{decision="degrade",route="/sliding/"} 0
+turnike_requests_total{decision="degrade",route="/token/"} 0
+turnike_requests_total{decision="degrade_allow",route="/burst-fixed/"} 0
+turnike_requests_total{decision="degrade_allow",route="/burst-sliding/"} 0
+turnike_requests_total{decision="degrade_allow",route="/burst-token/"} 0
+turnike_requests_total{decision="degrade_allow",route="/fixed/"} 0
+turnike_requests_total{decision="degrade_allow",route="/sliding/"} 0
+turnike_requests_total{decision="degrade_allow",route="/token/"} 0
+turnike_requests_total{decision="degrade_deny",route="/burst-fixed/"} 0
+turnike_requests_total{decision="degrade_deny",route="/burst-sliding/"} 0
+turnike_requests_total{decision="degrade_deny",route="/burst-token/"} 0
+turnike_requests_total{decision="degrade_deny",route="/fixed/"} 0
+turnike_requests_total{decision="degrade_deny",route="/sliding/"} 0
+turnike_requests_total{decision="degrade_deny",route="/token/"} 0
+turnike_requests_total{decision="deny",route="/burst-fixed/"} 0
+turnike_requests_total{decision="deny",route="/burst-sliding/"} 0
+turnike_requests_total{decision="deny",route="/burst-token/"} 0
+turnike_requests_total{decision="deny",route="/fixed/"} 0
+turnike_requests_total{decision="deny",route="/sliding/"} 0
+turnike_requests_total{decision="deny",route="/token/"} 0
+# === gateway-3 /metrics ===
+# HELP turnike_breaker_state Redis circuit breaker state: 0=closed, 1=open, 2=half-open. Constant 0 under the memory backend, where no breaker exists.
+# TYPE turnike_breaker_state gauge
+turnike_breaker_state 0
+# HELP turnike_limiter_backend 1 for the backend that answered the most recent rate-limit decision (redis flips to memory while the degrade fallback answers; under fail_open/fail_closed nothing else answers, so it stays on redis - breaker_state carries those outages). Flips are serialized, last decision wins; a scrape may catch one mid-flip.
+# TYPE turnike_limiter_backend gauge
+turnike_limiter_backend{backend="memory"} 0
+turnike_limiter_backend{backend="redis"} 1
+# HELP turnike_request_duration_seconds Gateway answer duration in seconds for routed requests, all outcomes: allowed answers include upstream time, denials return without proxying.
+# TYPE turnike_request_duration_seconds histogram
+turnike_request_duration_seconds_bucket{le="0.0005"} 1405
+turnike_request_duration_seconds_bucket{le="0.001"} 3425
+turnike_request_duration_seconds_bucket{le="0.0025"} 3859
+turnike_request_duration_seconds_bucket{le="0.005"} 3937
+turnike_request_duration_seconds_bucket{le="0.01"} 3962
+turnike_request_duration_seconds_bucket{le="0.025"} 3990
+turnike_request_duration_seconds_bucket{le="0.05"} 3999
+turnike_request_duration_seconds_bucket{le="0.1"} 4000
+turnike_request_duration_seconds_bucket{le="0.25"} 4000
+turnike_request_duration_seconds_bucket{le="0.5"} 4000
+turnike_request_duration_seconds_bucket{le="1"} 4000
+turnike_request_duration_seconds_bucket{le="2.5"} 4000
+turnike_request_duration_seconds_bucket{le="5"} 4000
+turnike_request_duration_seconds_bucket{le="10"} 4000
+turnike_request_duration_seconds_bucket{le="+Inf"} 4000
+turnike_request_duration_seconds_sum 3.857189029000006
+turnike_request_duration_seconds_count 4000
+# HELP turnike_requests_total Requests that reached the rate-limit decision point, by configured route prefix and decision. allow/deny are the configured backend's own verdict; degrade_allow/degrade_deny are the degrade fallback's verdict; degrade means no verdict existed (fail_open pass-through or fail_closed 503). Unrouted and reserved paths are not counted.
+# TYPE turnike_requests_total counter
+turnike_requests_total{decision="allow",route="/burst-fixed/"} 0
+turnike_requests_total{decision="allow",route="/burst-sliding/"} 0
+turnike_requests_total{decision="allow",route="/burst-token/"} 0
+turnike_requests_total{decision="allow",route="/fixed/"} 0
+turnike_requests_total{decision="allow",route="/sliding/"} 4000
+turnike_requests_total{decision="allow",route="/token/"} 0
+turnike_requests_total{decision="degrade",route="/burst-fixed/"} 0
+turnike_requests_total{decision="degrade",route="/burst-sliding/"} 0
+turnike_requests_total{decision="degrade",route="/burst-token/"} 0
+turnike_requests_total{decision="degrade",route="/fixed/"} 0
+turnike_requests_total{decision="degrade",route="/sliding/"} 0
+turnike_requests_total{decision="degrade",route="/token/"} 0
+turnike_requests_total{decision="degrade_allow",route="/burst-fixed/"} 0
+turnike_requests_total{decision="degrade_allow",route="/burst-sliding/"} 0
+turnike_requests_total{decision="degrade_allow",route="/burst-token/"} 0
+turnike_requests_total{decision="degrade_allow",route="/fixed/"} 0
+turnike_requests_total{decision="degrade_allow",route="/sliding/"} 0
+turnike_requests_total{decision="degrade_allow",route="/token/"} 0
+turnike_requests_total{decision="degrade_deny",route="/burst-fixed/"} 0
+turnike_requests_total{decision="degrade_deny",route="/burst-sliding/"} 0
+turnike_requests_total{decision="degrade_deny",route="/burst-token/"} 0
+turnike_requests_total{decision="degrade_deny",route="/fixed/"} 0
+turnike_requests_total{decision="degrade_deny",route="/sliding/"} 0
+turnike_requests_total{decision="degrade_deny",route="/token/"} 0
+turnike_requests_total{decision="deny",route="/burst-fixed/"} 0
+turnike_requests_total{decision="deny",route="/burst-sliding/"} 0
+turnike_requests_total{decision="deny",route="/burst-token/"} 0
+turnike_requests_total{decision="deny",route="/fixed/"} 0
+turnike_requests_total{decision="deny",route="/sliding/"} 0
+turnike_requests_total{decision="deny",route="/token/"} 0
