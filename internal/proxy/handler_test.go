@@ -242,6 +242,49 @@ func TestHandlerMetricsEndpoint(t *testing.T) {
 	}
 }
 
+func TestHandlerMetricsDisabled(t *testing.T) {
+	// The public deployment gates /metrics off the client-facing port.
+	// With no separate admin listener, the guard must 404 the scrape path
+	// for every method, keep it out of the proxy, and leave the health
+	// endpoints (which are safe to expose) untouched.
+	up := echoUpstream(t, "api")
+	m := metrics.New()
+	cfg := &config.Config{
+		Server: config.Server{MetricsDisabled: true},
+		Routes: []config.Route{{Prefix: "/", Upstream: up.URL}},
+	}
+	h, err := NewHandler(cfg, slog.New(slog.DiscardHandler), allowAllLimiter{}, m)
+	if err != nil {
+		t.Fatalf("NewHandler: %v", err)
+	}
+
+	// Every method on /metrics is a 404 - a disabled endpoint should look
+	// unmounted, not 405 (which would still advertise it exists).
+	for _, method := range []string{"GET", "HEAD", "POST"} {
+		w := httptest.NewRecorder()
+		h.ServeHTTP(w, httptest.NewRequest(method, "/metrics", nil))
+		if w.Code != http.StatusNotFound {
+			t.Errorf("%s /metrics = %d, want 404 when gated", method, w.Code)
+		}
+		if strings.Contains(w.Body.String(), "turnike_") {
+			t.Errorf("%s /metrics leaked metrics while gated:\n%s", method, w.Body.String())
+		}
+		if got := w.Header().Get("X-Upstream"); got != "" {
+			t.Errorf("%s /metrics was proxied upstream (X-Upstream %q); a gated scrape must not reach the route table", method, got)
+		}
+	}
+
+	// The health endpoints are safe on a public listener and stay served -
+	// only /metrics is gated.
+	for _, path := range []string{"/healthz", "/readyz"} {
+		w := httptest.NewRecorder()
+		h.ServeHTTP(w, httptest.NewRequest("GET", path, nil))
+		if w.Code != http.StatusOK {
+			t.Errorf("GET %s = %d, want 200 (only /metrics is gated)", path, w.Code)
+		}
+	}
+}
+
 func TestHandlerFullChain(t *testing.T) {
 	up := echoUpstream(t, "api")
 	var buf bytes.Buffer

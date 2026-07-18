@@ -48,7 +48,15 @@ type Config struct {
 // Server holds HTTP server settings. Zero timeouts are replaced with the
 // defaults noted below; timeouts cannot be disabled in M1.
 type Server struct {
-	Listen            string   `yaml:"listen"`
+	Listen string `yaml:"listen"`
+	// MetricsDisabled gates the /metrics endpoint off the client-facing
+	// listener. There is no separate admin listener, so /metrics otherwise
+	// shares the data-plane port; the public deployment sets this true so a
+	// Prometheus scrape endpoint is never reachable from the internet (Fly
+	// does not path-block, and nothing scrapes prod - Grafana stays local).
+	// The zero value keeps /metrics served, which every non-prod config
+	// expects.
+	MetricsDisabled   bool     `yaml:"metrics_disabled"`
 	ReadHeaderTimeout Duration `yaml:"read_header_timeout"` // default 5s
 	ReadTimeout       Duration `yaml:"read_timeout"`        // default 30s
 	WriteTimeout      Duration `yaml:"write_timeout"`       // default 60s; also caps proxied response time

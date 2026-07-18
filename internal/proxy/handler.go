@@ -51,7 +51,17 @@ func NewHandler(cfg *config.Config, logger *slog.Logger, lim limiter.Limiter, m 
 	}
 	proxied := Middleware(logger, m)(gw)
 	metricsHandler := m.Handler()
+	metricsDisabled := cfg.Server.MetricsDisabled
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// The public deployment gates /metrics off this listener (there is
+		// no separate admin listener). Answer 404 for every method - a
+		// disabled scrape endpoint should be indistinguishable from one
+		// that was never mounted, not a 405 that advertises it exists - and
+		// return before the switch so it is never proxied to an upstream.
+		if metricsDisabled && r.URL.Path == "/metrics" {
+			writeText(w, http.StatusNotFound, "not found")
+			return
+		}
 		switch r.URL.Path {
 		case "/healthz", "/readyz", "/metrics":
 			// Probes and scrapers speak GET/HEAD; answering 200 to
