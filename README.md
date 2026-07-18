@@ -7,6 +7,47 @@ and measured — not asserted — behavior: the multi-replica bypass, the
 burst-admission semantics of all three algorithms and the latency under
 load are all recorded runs in [`bench/`](bench/REPORT.md).
 
+## Try it live
+
+A single instance runs at **<https://turnike.fly.dev>** — no signup, no key.
+`X-API-Key` names your rate-limit bucket (any value works; change it for a
+fresh budget), and the upstream is a small echo that hands your request back
+as JSON.
+
+`/demo` admits **5 requests per 10 s**, then answers `429`. One loop trips it:
+
+```sh
+for i in $(seq 1 8); do
+  curl -s -o /dev/null -w '%{http_code} ' https://turnike.fly.dev/demo/hello -H 'X-API-Key: try-me'
+done; echo
+# 200 200 200 200 200 429 429 429
+```
+
+Every answer states the remaining budget in standard headers:
+
+```http
+HTTP/2 200
+x-ratelimit-limit: 5
+x-ratelimit-remaining: 4
+x-ratelimit-reset: 1784323200
+```
+
+The sixth request in the window is the mirror image — `429 Too Many Requests`
+with `x-ratelimit-remaining: 0` and `Retry-After: 4` (whole seconds, always
+rounded up, so it never advises a shorter wait than the real one).
+
+`/burst` answers the same question with a **token bucket** (burst 10, refill
+5/s): a spike of ten sails through, then it throttles to the refill rate — the
+`fixed_window` vs `token_bucket` trade-off, live.
+
+The live instance is one gateway with a co-located redis and echo upstream in
+a single Fly machine — a deliberate simplification of the topology below, with
+`/metrics` gated off the public port. It scales to zero when idle, so the
+first request after a quiet spell wakes it in a second or two. The two things
+one instance can't show — the **multi-replica bypass** (memory admits 90/150,
+redis exactly 30/150) and the **live Grafana degrade drill** — are the local
+`make demo` story in [Running it](#running-it).
+
 ## The problem
 
 APIs get rate-limited at the edge for three reasons: fairness between
