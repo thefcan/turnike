@@ -1,6 +1,6 @@
 BIN_DIR := bin
 
-.PHONY: build test test-integration lint run tidy demo load
+.PHONY: build test test-integration lint run tidy demo load deploy
 
 build:
 	go build -o $(BIN_DIR)/gateway ./cmd/gateway
@@ -34,3 +34,12 @@ demo:
 # the demo topology, writes raw outputs to bench/load/.
 load:
 	./scripts/load_test.sh
+
+# Deploys the single-instance live demo to Fly.io. Builds with the LOCAL
+# docker daemon (--local-only) so the build context never uploads to Fly's
+# remote builder — the local-only agent files never leave this machine.
+# Fly Machines are amd64, so the platform is pinned (built via emulation on
+# Apple Silicon). Requires flyctl + `fly auth login` + an app already created
+# from fly.toml — see DEPLOY.md for the one-time setup.
+deploy:
+	DOCKER_DEFAULT_PLATFORM=linux/amd64 flyctl deploy --local-only

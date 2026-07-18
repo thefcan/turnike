@@ -1,0 +1,32 @@
+# Docker build context hygiene.
+#
+# The build only needs Go sources, go.mod/go.sum, the baked fly config and
+# the entrypoint. Everything below is either not a build input or must never
+# leave this machine. Without this file `COPY . .` uploads the whole tree —
+# including the local-only agent files — to the (remote) builder, even
+# though it never lands in the final image. `make deploy` also builds
+# locally so the context stays on this machine; this is defense-in-depth.
+
+.git
+.github
+.gitignore
+
+# Local-only agent files (gitignored) — must never leave this machine.
+.claude
+CLAUDE.md
+PROGRESS.md
+SHOTLIST.md
+
+# Build outputs, recorded benchmarks — heavy, not build inputs.
+bin
+bench
+
+# Demo/dev orchestration and scripts — not needed to build the binaries.
+demo
+scripts
+docker-compose.dev.yml
+docker-compose.demo.yml
+
+# Docs and local env.
+*.md
+.env

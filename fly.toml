@@ -1,0 +1,45 @@
+# fly.toml — turnike single-instance live demo. See DEPLOY.md.
+#
+# One machine, one public service on :8080. The co-located redis (6379) and
+# echo upstream (9000) are loopback-only and never declared here, so they
+# are unreachable from the internet; /metrics is gated off in config.fly.yaml.
+#
+# `app` and `primary_region` are finalized at `fly launch` (app names are
+# globally unique — if "turnike" is taken, pick another and update both this
+# file and the README "Try it live" URL). Validate with `fly config validate`.
+
+app = "turnike"
+primary_region = "fra"
+
+[build]
+  dockerfile = "Dockerfile"
+  build-target = "deploy"
+
+[http_service]
+  internal_port = 8080
+  force_https = true
+  # Scale to zero when idle to keep cost near nothing; the first request
+  # after an idle period wakes the machine (a few seconds of cold start,
+  # and the ephemeral redis starts empty — fine for a rate-limit demo).
+  # Set min_machines_running = 1 instead for an always-warm box.
+  auto_stop_machines = "stop"
+  auto_start_machines = true
+  min_machines_running = 0
+
+  # Keep a curious visitor from overwhelming the tiny machine.
+  [http_service.concurrency]
+    type = "requests"
+    soft_limit = 40
+    hard_limit = 80
+
+  # Liveness on the always-200 health endpoint (safe to expose; generic body).
+  [[http_service.checks]]
+    method = "GET"
+    path = "/healthz"
+    interval = "15s"
+    timeout = "2s"
+    grace_period = "5s"
+
+[[vm]]
+  size = "shared-cpu-1x"
+  memory = "256mb"

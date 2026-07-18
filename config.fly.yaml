@@ -1,0 +1,38 @@
+# turnike — live single-instance demo config (Fly.io). See DEPLOY.md.
+#
+# One machine runs the gateway plus a co-located plain redis
+# (127.0.0.1:6379, no auth) and a co-located echo upstream
+# (127.0.0.1:9000) — a documented simplification of the multi-box topology
+# in the README (which is what `make demo` runs locally). Quotas are
+# deliberately tiny so a curious visitor trips a 429 in seconds without
+# burning the box, and /metrics is gated off this public listener.
+
+server:
+  listen: ":8080"
+  metrics_disabled: true # no admin listener; keep the scrape endpoint off the public port
+
+limiter:
+  backend: redis
+  redis:
+    addr: "127.0.0.1:6379" # co-located sidecar; loopback needs no password
+    on_error: degrade      # a redis blip -> per-instance in-memory limiting, real headers
+
+routes:
+  # The headline route: 5 requests per 10s, then 429 + Retry-After. A short
+  # curl loop trips it immediately — this is what the README "Try it live"
+  # snippet drives.
+  - prefix: /demo/
+    upstream: http://127.0.0.1:9000
+    limit:
+      algorithm: fixed_window
+      rate: 5
+      window: 10s
+
+  # Token bucket: absorbs a burst of up to 10, then refills 5/s — a
+  # different answer to the same "too many requests" question, in one hop.
+  - prefix: /burst/
+    upstream: http://127.0.0.1:9000
+    limit:
+      algorithm: token_bucket
+      rate: 5
+      burst: 10
