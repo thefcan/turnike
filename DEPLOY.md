@@ -1,13 +1,30 @@
 # Deploying turnike (Fly.io)
 
-turnike runs as a **single-instance live demo** on Fly.io: one machine, one
-public service on `:8080`, with a **co-located plain redis** (`127.0.0.1:6379`,
-no auth) and a **co-located echo upstream** (`127.0.0.1:9000`) started by
+> **Status: prepared, not currently deployed.** Everything here is built and
+> locally verified (see below), but no public instance is running — hosting it
+> costs money and that call is deliberately left open. This is the runbook for
+> the day there is a host; the README's local drills need none of it.
+
+turnike deploys as a **single-instance demo**: one machine, one public service
+on `:8080`, with a **co-located plain redis** (`127.0.0.1:6379`, no auth) and a
+**co-located echo upstream** (`127.0.0.1:9000`) started by
 [`deploy/entrypoint.sh`](deploy/entrypoint.sh). It is a deliberate
 simplification of the multi-box topology in the README — that one is what
 `make demo` runs locally.
 
 This is a demo deployment: no multi-region, no autoscaling, no custom domain.
+
+**Verified so far:** the `deploy` image builds and runs on both `arm64` and
+`amd64` — `/metrics` gated to 404, `200×5 → 429` with `X-RateLimit-*` and
+`Retry-After`, decisions served by the real redis Lua path (`turnike:*` keys
+present, not the degrade fallback), redis up as uid 65532 with a 64 MB cap.
+
+**Not tied to Fly.** The `deploy` stage is the Dockerfile's *last* stage, so
+any host that builds a plain `Dockerfile` gets the right image without knowing
+about build targets. Porting needs three things from a candidate host: Docker
+image deploys, a way to serve on port **8080** (the config has no `PORT` env
+support — `server.listen` is literal YAML), and whatever its current pricing
+and card requirements are.
 
 ## ⚠️ Before you start — account & cost
 

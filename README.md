@@ -7,46 +7,42 @@ and measured — not asserted — behavior: the multi-replica bypass, the
 burst-admission semantics of all three algorithms and the latency under
 load are all recorded runs in [`bench/`](bench/REPORT.md).
 
-## Try it live
+## See it work in 30 seconds
 
-A single instance runs at **<https://turnike.fly.dev>** — no signup, no key.
-`X-API-Key` names your rate-limit bucket (any value works; change it for a
-fresh budget), and the upstream is a small echo that hands your request back
-as JSON.
-
-`/demo` admits **5 requests per 10 s**, then answers `429`. One loop trips it:
+No Docker, no redis, no signup — just Go 1.26+ and two terminals' worth of
+patience:
 
 ```sh
-for i in $(seq 1 8); do
-  curl -s -o /dev/null -w '%{http_code} ' https://turnike.fly.dev/demo/hello -H 'X-API-Key: try-me'
+make build
+./bin/mock &                                  # echo upstream on :9000
+./bin/gateway -config config.example.yaml &   # gateway on :8080
+
+# /auth is fixed_window 3-per-10s, so the 4th request in the window is denied:
+for i in $(seq 1 5); do
+  curl -s -o /dev/null -w '%{http_code} ' localhost:8080/auth/login -H 'X-API-Key: try-me'
 done; echo
-# 200 200 200 200 200 429 429 429
+# 200 200 200 429 429
 ```
 
-Every answer states the remaining budget in standard headers:
+Every answer states the remaining budget in standard headers, and the denial
+is the mirror image of the grant:
 
 ```http
-HTTP/2 200
-x-ratelimit-limit: 5
-x-ratelimit-remaining: 4
-x-ratelimit-reset: 1784323200
+HTTP/1.1 200 OK                HTTP/1.1 429 Too Many Requests
+X-RateLimit-Limit: 3           X-RateLimit-Limit: 3
+X-RateLimit-Remaining: 2       X-RateLimit-Remaining: 0
+X-RateLimit-Reset: 1785239570  X-RateLimit-Reset: 1785239570
+                               Retry-After: 4
 ```
 
-The sixth request in the window is the mirror image — `429 Too Many Requests`
-with `x-ratelimit-remaining: 0` and `Retry-After: 4` (whole seconds, always
-rounded up, so it never advises a shorter wait than the real one).
+`Retry-After` is in whole seconds and always rounded up — it never advises a
+shorter wait than the real one. The same config also serves `/search`
+(sliding_window) and `/api` (token_bucket with a burst of 20), so all three
+algorithms are one curl apart.
 
-`/burst` answers the same question with a **token bucket** (burst 10, refill
-5/s): a spike of ten sails through, then it throttles to the refill rate — the
-`fixed_window` vs `token_bucket` trade-off, live.
-
-The live instance is one gateway with a co-located redis and echo upstream in
-a single Fly machine — a deliberate simplification of the topology below, with
-`/metrics` gated off the public port. It scales to zero when idle, so the
-first request after a quiet spell wakes it in a second or two. The two things
-one instance can't show — the **multi-replica bypass** (memory admits 90/150,
-redis exactly 30/150) and the **live Grafana degrade drill** — are the local
-`make demo` story in [Running it](#running-it).
+From there the interesting drills are `make demo` — the multi-replica bypass
+this whole repo exists to measure (memory admits 90/150, redis exactly 30/150)
+— and the live Grafana degrade drill, both in [Running it](#running-it).
 
 ## The problem
 
