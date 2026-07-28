@@ -1,0 +1,26 @@
+# render.yaml — Render Blueprint for the single-instance live demo.
+# See DEPLOY.md. The free instance type needs no payment method, which is
+# why this is the default target; fly.toml is the equivalent for Fly.io.
+#
+# The image is the Dockerfile's last stage (`deploy`): one container running
+# the gateway plus a co-located plain redis and echo upstream. No managed
+# database is needed — redis lives in the container — and no secrets are
+# required, since the redis is loopback-only.
+
+services:
+  - type: web
+    name: turnike
+    runtime: docker
+    plan: free
+    region: frankfurt
+    dockerfilePath: ./Dockerfile
+    dockerContext: .
+    healthCheckPath: /healthz
+    autoDeploy: true
+    envVars:
+      # The gateway's listen address is literal YAML (config.deploy.yaml,
+      # `server.listen: ":8080"`) — it does not read PORT. Setting PORT here
+      # tells Render's proxy to route to 8080, which is where the gateway
+      # already listens.
+      - key: PORT
+        value: 8080
