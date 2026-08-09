@@ -9,9 +9,7 @@ load are all recorded runs in [`bench/`](bench/REPORT.md).
 
 ## Try it live
 
-[![The demo page after one burst: five requests admitted, five rejected, with
-the live X-RateLimit headers and the countdown to the next
-window](docs/demo.png)](https://turnike.onrender.com/?auto)
+[![Five requests admitted, five rejected, with the live X-RateLimit headers and the countdown to the next window](docs/demo.png)](https://turnike.onrender.com/?auto)
 
 **<https://turnike.onrender.com>** — no signup, no key, nothing to install.
 Press **Send** and the page fires ten concurrent requests at this gateway:
@@ -19,8 +17,8 @@ five come back green, five come back `429`, and the real `X-RateLimit-*`
 headers and the countdown to the next window are printed underneath. The
 `/burst/` option swaps the fixed window for a token bucket, which admits ten
 and then meters — same page, one dropdown. The shot above is a real run
-against the hosted instance; [`?auto`](https://turnike.onrender.com/?auto)
-fires one on load, which is also how the image is regenerated.
+against the hosted instance, and
+[`?auto`](https://turnike.onrender.com/?auto) fires one on load.
 
 The page is served by the gateway itself
 ([`demo.html`](internal/proxy/demo.html), embedded in the binary and gated
