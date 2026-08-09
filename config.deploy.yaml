@@ -1,4 +1,6 @@
-# turnike — live single-instance demo config (Fly.io). See DEPLOY.md.
+# turnike — live single-instance demo config. Host-agnostic: it backs the
+# Render deployment at https://turnike.onrender.com and the Fly.io target
+# alike. See DEPLOY.md.
 #
 # One machine runs the gateway plus a co-located plain redis
 # (127.0.0.1:6379, no auth) and a co-located echo upstream

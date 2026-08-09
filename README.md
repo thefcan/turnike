@@ -7,6 +7,56 @@ and measured — not asserted — behavior: the multi-replica bypass, the
 burst-admission semantics of all three algorithms and the latency under
 load are all recorded runs in [`bench/`](bench/REPORT.md).
 
+## Try it live
+
+A single instance runs at **<https://turnike.onrender.com>** — no signup, no
+key. `X-API-Key` names your rate-limit bucket, and the upstream is a small echo
+that hands your request back as JSON. It is a free instance that **sleeps after
+~15 minutes idle**, so the first request may take 30–60 s to wake it; everything
+after that is warm.
+
+**Send a key you made up.** Identity is the `X-API-Key` header, falling back to
+`RemoteAddr` — and [`identity.go`](internal/proxy/identity.go) deliberately does
+not trust `X-Forwarded-For`, since a client-controlled header would let anyone
+mint fresh identities. Behind a platform proxy that fallback resolves to the
+proxy itself, so every *keyless* visitor on the internet shares one bucket and
+collects 429s nobody in particular caused. `try-me` below is shared for the same
+reason — swap in your own string and the budget is yours alone.
+
+`/demo` admits **5 requests per 10 s**, then answers `429`. Fire ten at once and
+exactly five get through — the split is decided by one Lua script inside redis,
+so concurrency cannot inflate it:
+
+```sh
+seq 1 10 | xargs -P 10 -I{} \
+  curl -s -o /dev/null -w '%{http_code}\n' \
+  https://turnike.onrender.com/demo/hello -H 'X-API-Key: try-me' | sort | uniq -c
+#    5 200
+#    5 429
+```
+
+A sequential `for` loop works too, but round-trip latency can spread eight
+requests across two 10 s windows and let all eight through — that is the
+fixed-window boundary showing itself, not a missing limit. The parallel form
+above lands in a single window.
+
+Every answer states the remaining budget in standard headers:
+
+```http
+HTTP/2 429
+x-ratelimit-limit: 5
+x-ratelimit-remaining: 0
+x-ratelimit-reset: 1786282780
+retry-after: 2
+```
+
+`retry-after` is whatever is left of the current window — up to 10 s here, and
+always rounded up, so it never advises a shorter wait than the real one.
+
+`/burst/` on the same instance is token_bucket (burst 10, refill 5/s), and
+`/metrics` answers **404 from the internet** on purpose — the scrape endpoint is
+gated off the public listener. Runbook: [DEPLOY.md](DEPLOY.md).
+
 ## See it work in 30 seconds
 
 No Docker, no redis, no signup — just Go 1.26+ and two terminals' worth of

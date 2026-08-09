@@ -2,7 +2,7 @@
 #
 # One machine, one public service on :8080. The co-located redis (6379) and
 # echo upstream (9000) are loopback-only and never declared here, so they
-# are unreachable from the internet; /metrics is gated off in config.fly.yaml.
+# are unreachable from the internet; /metrics is gated off in config.deploy.yaml.
 #
 # `app` and `primary_region` are finalized at `fly launch` (app names are
 # globally unique — if "turnike" is taken, pick another and update both this

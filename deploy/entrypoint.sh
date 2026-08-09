@@ -1,5 +1,6 @@
 #!/bin/sh
-# turnike live-demo entrypoint (Fly.io single instance, see DEPLOY.md).
+# turnike live-demo entrypoint — one instance, any host that builds this
+# Dockerfile (Render today, Fly.io equivalently). See DEPLOY.md.
 #
 # Three co-located processes in one machine: a plain localhost redis and the
 # echo upstream run in the background; the gateway runs in the foreground via
@@ -9,7 +10,8 @@
 #   - if redis dies, the gateway degrades to per-instance in-memory limiting
 #     (on_error: degrade — real headers, still protected);
 #   - if mock dies, the proxied routes answer 502;
-#   - Fly restarts the machine only when the foreground gateway exits.
+#   - the platform restarts the instance only when the foreground gateway
+#     exits, since that is the process it supervises.
 set -eu
 
 # Plain, ephemeral, localhost-only redis: no persistence (rate-limit keys are

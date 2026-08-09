@@ -7,10 +7,18 @@ auth) and a **co-located echo upstream** (`127.0.0.1:9000`) started by
 simplification of the multi-box topology in the README — that one is what
 `make demo` runs locally. No multi-region, no autoscaling, no custom domain.
 
+**Live:** <https://turnike.onrender.com> — Render free plan, region
+`frankfurt`, Blueprint-managed from `main`.
+
 **Verified locally:** the `deploy` image builds and runs on both `arm64` and
 `amd64` — `/metrics` gated to 404, `200×5 → 429` with `X-RateLimit-*` and
 `Retry-After`, decisions served by the real redis Lua path (`turnike:*` keys
-present, not the degrade fallback), redis up as uid 65532 with a 64 MB cap.
+present, not the degrade fallback — `INFO commandstats` shows the `evalsha`
+calls), redis up as uid 65532 with a 64 MB cap.
+
+**Verified on the live instance:** ten concurrent requests admit exactly five
+and reject five, the `429` carries `retry-after` alongside the `x-ratelimit-*`
+trio, and `/metrics` is 404 over the public internet.
 
 **Host-agnostic by construction.** `deploy` is the Dockerfile's *last* stage,
 so any host that builds a plain `Dockerfile` gets the right image without
@@ -37,6 +45,14 @@ request after an idle spell waits ~30–60 s while it wakes.
 **One-time setup** (all in the browser — no CLI):
 
 1. Sign up at <https://render.com> with the GitHub account that owns the repo.
+   If the account already exists, check *which* GitHub account Render holds:
+   **New → Blueprint** lists it above the repo picker. Render's GitHub App is
+   granted per-account and per-repo, so an account that cannot see `turnike`
+   shows an empty picker — use **Configure account** → install the Render app
+   on the owning account (`thefcan`) → **Only select repositories** →
+   `turnike`. The alternative on that page, *Public Git Repository* by URL,
+   works for a public repo but **forfeits auto-deploy**, so the blueprint's
+   `autoDeploy: true` would become a lie.
 2. **New → Blueprint**, pick `thefcan/turnike`. Render reads
    [`render.yaml`](render.yaml) and proposes one free web service named
    `turnike`. Apply it.
@@ -91,12 +107,23 @@ HOST=https://turnike.onrender.com
 curl -i $HOST/demo/hello -H 'X-API-Key: try-me'
 #    -> 200, with X-RateLimit-Limit / -Remaining / -Reset
 
-# 2. Trip the limit — /demo is fixed_window 5-per-10s, so the 6th request
-#    inside the window is a 429 with Retry-After:
-for i in $(seq 1 8); do
-  curl -s -o /dev/null -w '%{http_code} ' $HOST/demo/hello -H 'X-API-Key: try-me'
-done; echo
-#    -> 200 200 200 200 200 429 429 429
+# 2. Trip the limit — /demo is fixed_window 5-per-10s. Fire the burst in
+#    PARALLEL: over the internet a sequential loop can straddle two 10s
+#    windows and let every request through (the fixed-window boundary, not a
+#    missing limit). Ten at once always splits 5/5:
+seq 1 10 | xargs -P 10 -I{} \
+  curl -s -o /dev/null -w '%{http_code}\n' $HOST/demo/hello -H 'X-API-Key: try-me' \
+  | sort | uniq -c
+#    -> 5 200
+#       5 429
+
+# 2b. A rejected request, in full. Use a FRESH key and exhaust its window in
+#     the same breath — reusing the key above races the window reset and can
+#     hand you a 200:
+seq 1 5 | xargs -P 5 -I{} curl -s -o /dev/null $HOST/demo/hello -H 'X-API-Key: rejected'
+curl -si $HOST/demo/hello -H 'X-API-Key: rejected' \
+  | grep -i '^HTTP/\|^x-ratelimit\|^retry-after'
+#    -> HTTP/2 429 + x-ratelimit-limit/-remaining/-reset + retry-after
 
 # 3. /metrics is NOT reachable from the internet (gated off this listener):
 curl -s -o /dev/null -w '%{http_code}\n' $HOST/metrics
@@ -116,6 +143,16 @@ curl -s $HOST/healthz    # -> ok
   in-memory limiting (`on_error: degrade`, real headers); if mock dies the
   routes 502; the platform restarts the container only when the foreground
   gateway exits. Acceptable for a demo.
+- **A recurring redis warning in Render's logs is expected.** Roughly once a
+  minute the app log carries redis's `# Possible SECURITY ATTACK detected...
+  Connection from 127.0.0.1:<port> aborted.` That is Render's in-container port
+  probe speaking HTTP at `127.0.0.1:6379`; redis's cross-protocol guard refuses
+  it, which is the guard working. Nothing off-box can reach redis — the
+  entrypoint binds it to `127.0.0.1` and Render publishes only the HTTP port.
+  Silencing it entirely means giving redis no TCP listener at all
+  (`--unixsocket /tmp/redis.sock --port 0`, with `limiter.redis.addr` set to
+  that path — go-redis picks `unix` for any addr starting with `/`).
+
 - **Observability stays local.** `/metrics` is gated off the public port
   (`server.metrics_disabled: true` in [`config.deploy.yaml`](config.deploy.yaml))
   and nothing scrapes the public instance. The Prometheus + Grafana degrade
