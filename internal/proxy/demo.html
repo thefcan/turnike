@@ -196,5 +196,11 @@
     renderHeaders(shown);
     goEl.disabled = false;
   });
+
+  // "?auto" fires one burst on load, so the demo can be linked to in a
+  // state worth looking at (and captured for the README without a human
+  // pressing anything). The key stays per-visitor, so an auto link still
+  // lands you in your own bucket rather than a shared one.
+  if (/(^|[?&])auto(&|=|$)/.test(location.search)) goEl.click();
 })();
 </script>
