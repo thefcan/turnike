@@ -1,0 +1,200 @@
+<!doctype html>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>turnike — live rate-limit demo</title>
+<style>
+  :root {
+    --bg: #0f0f10; --fg: #e6e6e6; --dim: #8a8a90; --line: #2a2a2e;
+    --ok: #2ea043; --deny: #d1414a; --accent: #a970ff;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; padding: 2rem 1.25rem; background: var(--bg); color: var(--fg);
+    font: 14px/1.55 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  }
+  main { max-width: 44rem; margin: 0 auto; }
+  h1 { font-size: 1.5rem; margin: 0 0 .25rem; letter-spacing: -.02em; }
+  h1 span { color: var(--accent); }
+  p { color: var(--dim); margin: .35rem 0; }
+  a { color: var(--accent); }
+  .controls {
+    display: flex; flex-wrap: wrap; gap: .6rem; align-items: flex-end;
+    margin: 1.5rem 0 1rem; padding-top: 1.25rem; border-top: 1px solid var(--line);
+  }
+  label { display: block; font-size: .74rem; color: var(--dim); margin-bottom: .3rem; text-transform: uppercase; letter-spacing: .06em; }
+  input, select, button {
+    font: inherit; background: #17171a; color: var(--fg);
+    border: 1px solid var(--line); border-radius: 6px; padding: .5rem .65rem;
+  }
+  input { width: 15rem; }
+  button { background: var(--accent); color: #14121a; border-color: var(--accent); cursor: pointer; font-weight: 600; }
+  button:disabled { opacity: .5; cursor: default; }
+  .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(4.6rem, 1fr)); gap: .5rem; margin: 1.1rem 0; }
+  .cell {
+    border: 1px solid var(--line); border-radius: 6px; padding: .55rem .3rem;
+    text-align: center; background: #141417;
+  }
+  .cell b { display: block; font-size: 1.05rem; }
+  .cell.ok { border-color: var(--ok); } .cell.ok b { color: var(--ok); }
+  .cell.deny { border-color: var(--deny); } .cell.deny b { color: var(--deny); }
+  .cell.err { border-color: var(--dim); } .cell.err b { color: var(--dim); }
+  .cell small { color: var(--dim); font-size: .68rem; }
+  .tally { margin: .6rem 0; }
+  .tally b.ok { color: var(--ok); } .tally b.deny { color: var(--deny); }
+  pre {
+    background: #141417; border: 1px solid var(--line); border-radius: 6px;
+    padding: .8rem .9rem; overflow-x: auto; margin: .8rem 0 0; color: var(--dim);
+  }
+  pre .k { color: var(--fg); }
+  footer { margin-top: 2rem; padding-top: 1rem; border-top: 1px solid var(--line); color: var(--dim); font-size: .8rem; }
+</style>
+
+<main>
+  <h1>turn<span>ike</span></h1>
+  <p>A turnstile for your APIs. Every request below is real, served by this
+     instance and decided by a single Lua script inside redis.</p>
+
+  <div class="controls">
+    <div>
+      <label for="key">X-API-Key (your bucket)</label>
+      <input id="key" spellcheck="false" autocomplete="off">
+    </div>
+    <div>
+      <label for="route">Route</label>
+      <select id="route">
+        <option value="/demo/hello">/demo/ — fixed window, 5 per 10s</option>
+        <option value="/burst/hello">/burst/ — token bucket, burst 10, 5/s</option>
+      </select>
+    </div>
+    <div>
+      <label for="count">At once</label>
+      <select id="count">
+        <option>10</option><option>5</option><option>20</option><option>1</option>
+      </select>
+    </div>
+    <button id="go">Send</button>
+  </div>
+
+  <div class="tally" id="tally">Press <b>Send</b> to fire concurrent requests.</div>
+  <div class="grid" id="grid"></div>
+  <pre id="headers">Response headers appear here.</pre>
+
+  <footer>
+    Identity is the <code>X-API-Key</code> header — change it above and the budget
+    is yours alone. Requests without one fall back to the caller's address, which
+    behind a platform proxy is the proxy itself, so every keyless visitor would
+    share one bucket. <code>X-Forwarded-For</code> is deliberately not trusted.
+    <a href="https://github.com/thefcan/turnike">Source &amp; design notes</a>.
+  </footer>
+</main>
+
+<script>
+(function () {
+  var $ = function (id) { return document.getElementById(id); };
+  var keyEl = $('key'), routeEl = $('route'), countEl = $('count');
+  var goEl = $('go'), gridEl = $('grid'), tallyEl = $('tally'), headEl = $('headers');
+  var timer = null;
+
+  // A fresh bucket per visitor: a shared default would have everyone
+  // colliding on one budget and reading it as a broken demo.
+  var rand = new Uint8Array(4);
+  (window.crypto || {}).getRandomValues
+    ? window.crypto.getRandomValues(rand)
+    : rand.forEach(function (_, i) { rand[i] = Math.floor(Math.random() * 256); });
+  keyEl.value = 'visitor-' + Array.from(rand).map(function (b) {
+    return b.toString(16).padStart(2, '0');
+  }).join('');
+
+  function cell(cls, top, bottom) {
+    var d = document.createElement('div');
+    d.className = 'cell ' + cls;
+    d.innerHTML = '<b></b><small></small>';
+    d.querySelector('b').textContent = top;
+    d.querySelector('small').textContent = bottom;
+    return d;
+  }
+
+  function renderHeaders(h) {
+    if (!h) { headEl.textContent = 'No response headers (request failed).'; return; }
+    var names = ['x-ratelimit-limit', 'x-ratelimit-remaining', 'x-ratelimit-reset', 'retry-after'];
+    headEl.textContent = '';
+    names.forEach(function (n) {
+      var v = h.get(n);
+      if (v === null) return;
+      var line = document.createElement('div');
+      var k = document.createElement('span');
+      k.className = 'k'; k.textContent = n + ': ';
+      line.appendChild(k);
+      line.appendChild(document.createTextNode(v));
+      headEl.appendChild(line);
+    });
+    if (!headEl.textContent) headEl.textContent = 'No rate-limit headers on this response.';
+    countdown(h.get('x-ratelimit-reset'), h.get('retry-after'));
+  }
+
+  // Retry-After wins when present: it is relative, so it survives a
+  // visitor whose clock disagrees with the server's. X-RateLimit-Reset is
+  // absolute and is the only one of the two a 200 carries.
+  function countdown(reset, retryAfter) {
+    if (timer) { clearInterval(timer); timer = null; }
+    var at;
+    if (retryAfter !== null && isFinite(parseInt(retryAfter, 10))) {
+      at = Math.floor(Date.now() / 1000) + parseInt(retryAfter, 10);
+    } else if (reset) {
+      at = parseInt(reset, 10);
+    }
+    if (at === undefined || !isFinite(at)) return;
+    var line = document.createElement('div');
+    headEl.appendChild(line);
+    var tick = function () {
+      var left = at - Math.floor(Date.now() / 1000);
+      if (left <= 0) { line.textContent = '→ window reset — budget is full again'; clearInterval(timer); timer = null; return; }
+      line.textContent = '→ resets in ' + left + 's';
+    };
+    tick();
+    timer = setInterval(tick, 1000);
+  }
+
+  goEl.addEventListener('click', async function () {
+    var n = parseInt(countEl.value, 10), path = routeEl.value, key = keyEl.value;
+    goEl.disabled = true;
+    gridEl.textContent = '';
+    tallyEl.textContent = 'firing ' + n + ' concurrent requests at ' + path + '…';
+
+    var results = await Promise.all(Array.from({ length: n }, function () {
+      var t0 = performance.now();
+      return fetch(path, { headers: { 'X-API-Key': key }, cache: 'no-store' })
+        .then(function (r) { return { status: r.status, ms: performance.now() - t0, headers: r.headers }; })
+        .catch(function (e) { return { status: 0, ms: performance.now() - t0, error: String(e) }; });
+    }));
+
+    // Slowest-first ordering would hide the split; keep arrival order and
+    // let the colours do the talking.
+    // Show a REJECTED response's headers when there is one. results is in
+    // issue order, so picking the last entry would often land on a 200 and
+    // print "remaining: 3" with no Retry-After directly under a tally that
+    // says five were rejected — the page contradicting itself.
+    var ok = 0, denied = 0, failed = 0, shown = null, showsDenial = false;
+    results.forEach(function (r) {
+      if (r.status === 200) { ok++; gridEl.appendChild(cell('ok', '200', Math.round(r.ms) + 'ms')); }
+      else if (r.status === 429) { denied++; gridEl.appendChild(cell('deny', '429', Math.round(r.ms) + 'ms')); }
+      else { failed++; gridEl.appendChild(cell('err', r.status || 'ERR', Math.round(r.ms) + 'ms')); }
+      if (!r.headers || r.headers.get('x-ratelimit-limit') === null) return;
+      if (showsDenial) return;
+      shown = r.headers;
+      if (r.status === 429) showsDenial = true;
+    });
+
+    tallyEl.innerHTML = '';
+    var admitted = document.createElement('b'); admitted.className = 'ok'; admitted.textContent = ok + ' admitted';
+    var rejected = document.createElement('b'); rejected.className = 'deny'; rejected.textContent = denied + ' rejected';
+    tallyEl.appendChild(admitted);
+    tallyEl.appendChild(document.createTextNode('  ·  '));
+    tallyEl.appendChild(rejected);
+    if (failed) tallyEl.appendChild(document.createTextNode('  ·  ' + failed + ' failed'));
+
+    renderHeaders(shown);
+    goEl.disabled = false;
+  });
+})();
+</script>

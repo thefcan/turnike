@@ -56,7 +56,16 @@ type Server struct {
 	// does not path-block, and nothing scrapes prod - Grafana stays local).
 	// The zero value keeps /metrics served, which every non-prod config
 	// expects.
-	MetricsDisabled   bool     `yaml:"metrics_disabled"`
+	MetricsDisabled bool `yaml:"metrics_disabled"`
+	// DemoPage serves a small self-contained page at exactly "/" that
+	// fires concurrent requests at the configured routes and draws the
+	// admit/reject split from the real X-RateLimit-* headers. It exists
+	// so the public instance can show the limiter working without a
+	// terminal; same-origin is the point, since a cross-origin page
+	// cannot read a status code without CORS the gateway does not grant.
+	// The zero value keeps "/" proxied like any other path, so enabling
+	// this is the one thing that lets the page shadow a `prefix: /` route.
+	DemoPage          bool     `yaml:"demo_page"`
 	ReadHeaderTimeout Duration `yaml:"read_header_timeout"` // default 5s
 	ReadTimeout       Duration `yaml:"read_timeout"`        // default 30s
 	WriteTimeout      Duration `yaml:"write_timeout"`       // default 60s; also caps proxied response time

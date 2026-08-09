@@ -28,6 +28,7 @@ const readyCheckTimeout = time.Second
 // Limiter) into the root handler. /healthz, /readyz and /metrics are
 // reserved: they take precedence over configured routes and bypass the
 // middleware, so a scrape is never logged, rate-limited or counted.
+// server.demo_page reserves exactly "/" on the same terms.
 //
 // lim is injected rather than built from cfg here so tests can drive a
 // MemoryLimiter on a manual clock; cmd/gateway/main.go builds the
@@ -52,7 +53,22 @@ func NewHandler(cfg *config.Config, logger *slog.Logger, lim limiter.Limiter, m 
 	proxied := Middleware(logger, m)(gw)
 	metricsHandler := m.Handler()
 	metricsDisabled := cfg.Server.MetricsDisabled
+	demoPage := cfg.Server.DemoPage
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// The demo page answers ahead of the route table, like the health
+		// endpoints, and only on an exact "/" - a prefix match would
+		// swallow every proxied path. It bypasses the middleware and the
+		// limiter deliberately: a page that spent budget to load would
+		// misreport the very number it exists to display.
+		if demoPage && r.URL.Path == "/" {
+			if r.Method != http.MethodGet && r.Method != http.MethodHead {
+				w.Header().Set("Allow", "GET, HEAD")
+				writeText(w, http.StatusMethodNotAllowed, "method not allowed")
+				return
+			}
+			serveDemoPage(w)
+			return
+		}
 		// The public deployment gates /metrics off this listener (there is
 		// no separate admin listener). Answer 404 for every method - a
 		// disabled scrape endpoint should be indistinguishable from one

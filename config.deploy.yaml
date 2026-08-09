@@ -12,6 +12,7 @@
 server:
   listen: ":8080"
   metrics_disabled: true # no admin listener; keep the scrape endpoint off the public port
+  demo_page: true        # serve the live demo at "/" — the routes below are what it drives
 
 limiter:
   backend: redis

@@ -1,5 +1,10 @@
 server:
   listen: ":8080"
+  # Serve the bundled demo page at exactly "/" — it fires concurrent
+  # requests at the routes below and draws the admit/reject split from the
+  # real headers. Off by default: enabling it lets the page shadow a
+  # `prefix: /` route, and a gateway should stay a gateway unless asked.
+  # demo_page: true
   # Optional timeouts (defaults shown). write_timeout also caps how long a
   # proxied response may take.
   # read_header_timeout: 5s

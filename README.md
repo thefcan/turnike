@@ -9,28 +9,38 @@ load are all recorded runs in [`bench/`](bench/REPORT.md).
 
 ## Try it live
 
-A single instance runs at **<https://turnike.onrender.com>** — no signup, no
-key. `X-API-Key` names your rate-limit bucket, and the upstream is a small echo
-that hands your request back as JSON. It is a free instance that **sleeps after
-~15 minutes idle**, so the first request may take 30–60 s to wake it; everything
-after that is warm.
+**<https://turnike.onrender.com>** — no signup, no key, nothing to install.
+Press **Send** and the page fires ten concurrent requests at this gateway:
+five come back green, five come back `429`, and the real `X-RateLimit-*`
+headers and the countdown to the next window are printed underneath. The
+`/burst/` option swaps the fixed window for a token bucket, which admits ten
+and then meters — same page, one dropdown.
 
-**Send a key you made up.** Identity is the `X-API-Key` header, falling back to
-`RemoteAddr` — and [`identity.go`](internal/proxy/identity.go) deliberately does
-not trust `X-Forwarded-For`, since a client-controlled header would let anyone
-mint fresh identities. Behind a platform proxy that fallback resolves to the
-proxy itself, so every *keyless* visitor on the internet shares one bucket and
-collects 429s nobody in particular caused. `try-me` below is shared for the same
-reason — swap in your own string and the budget is yours alone.
+The page is served by the gateway itself
+([`demo.html`](internal/proxy/demo.html), embedded in the binary and gated
+behind `server.demo_page`). That is not incidental: only a same-origin script
+can read a status code back, and this repo does not hand out CORS.
 
-`/demo` admits **5 requests per 10 s**, then answers `429`. Fire ten at once and
-exactly five get through — the split is decided by one Lua script inside redis,
-so concurrency cannot inflate it:
+It is a free instance that **sleeps after ~15 minutes idle**, so the first hit
+may take 30–60 s to wake it; everything after that is warm.
+
+**The page gives you your own bucket** — a random `visitor-…` key per visitor.
+That matters more than it sounds. Identity is the `X-API-Key` header falling
+back to `RemoteAddr`, and [`identity.go`](internal/proxy/identity.go)
+deliberately does not trust `X-Forwarded-For`, since a client-controlled header
+would let anyone mint fresh identities. Behind a platform proxy that fallback
+resolves to the proxy itself, so every *keyless* caller shares one bucket and
+collects 429s nobody in particular caused.
+
+Prefer a terminal? `/demo` admits **5 requests per 10 s**, then answers `429`.
+Fire ten at once and exactly five get through — the split is decided by one Lua
+script inside redis, so concurrency cannot inflate it. Put your own string after
+`X-API-Key:`; the budget is then yours alone:
 
 ```sh
 seq 1 10 | xargs -P 10 -I{} \
   curl -s -o /dev/null -w '%{http_code}\n' \
-  https://turnike.onrender.com/demo/hello -H 'X-API-Key: try-me' | sort | uniq -c
+  https://turnike.onrender.com/demo/hello -H 'X-API-Key: pick-your-own' | sort | uniq -c
 #    5 200
 #    5 429
 ```

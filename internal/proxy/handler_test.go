@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"regexp"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -341,5 +342,144 @@ func TestHandlerFullChain(t *testing.T) {
 	}
 	if line.RequestID != respID {
 		t.Errorf("logged request_id = %q, response id = %q; want equal", line.RequestID, respID)
+	}
+}
+
+// newDemoHandler mirrors newTestHandler but turns the demo page on. Both
+// keep the catch-all "/" route, so these tests pin down exactly what the
+// page shadows and what it leaves alone.
+func newDemoHandler(t *testing.T, logger *slog.Logger, upstream string) http.Handler {
+	t.Helper()
+	cfg := &config.Config{
+		Server: config.Server{DemoPage: true},
+		Routes: []config.Route{{Prefix: "/", Upstream: upstream}},
+	}
+	h, err := NewHandler(cfg, logger, allowAllLimiter{}, metrics.New())
+	if err != nil {
+		t.Fatalf("NewHandler: %v", err)
+	}
+	return h
+}
+
+func TestHandlerDemoPageOffByDefault(t *testing.T) {
+	up := echoUpstream(t, "api")
+	h := newTestHandler(t, slog.New(slog.DiscardHandler), up.URL)
+
+	// The zero value must leave "/" to the route table, or enabling a
+	// catch-all route would silently lose its root.
+	r := httptest.NewRequest("GET", "/", nil)
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, r)
+	if w.Code != http.StatusOK {
+		t.Fatalf("GET / = %d, want 200", w.Code)
+	}
+	if ct := w.Header().Get("Content-Type"); strings.HasPrefix(ct, "text/html") {
+		t.Errorf("GET / served HTML with demo_page unset (Content-Type %q)", ct)
+	}
+	if !strings.Contains(w.Body.String(), `"marker":"api"`) {
+		t.Errorf("GET / body = %q, want the upstream echo", w.Body.String())
+	}
+}
+
+func TestHandlerDemoPageServedAtRoot(t *testing.T) {
+	up := echoUpstream(t, "api")
+	h := newDemoHandler(t, slog.New(slog.DiscardHandler), up.URL)
+
+	r := httptest.NewRequest("GET", "/", nil)
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, r)
+	if w.Code != http.StatusOK {
+		t.Fatalf("GET / = %d, want 200", w.Code)
+	}
+	if ct := w.Header().Get("Content-Type"); !strings.HasPrefix(ct, "text/html") {
+		t.Errorf("Content-Type = %q, want text/html", ct)
+	}
+	if strings.Contains(w.Body.String(), `"marker":"api"`) {
+		t.Error("GET / was proxied upstream instead of serving the demo page")
+	}
+	// The page is only worth serving if it can drive the limiter: it must
+	// carry the fetch that reads the budget headers back.
+	for _, want := range []string{"<title>turnike", "X-API-Key", "x-ratelimit-remaining"} {
+		if !strings.Contains(w.Body.String(), want) {
+			t.Errorf("demo page missing %q", want)
+		}
+	}
+	if got, want := w.Header().Get("Content-Length"), strconv.Itoa(w.Body.Len()); got != want {
+		t.Errorf("Content-Length = %q, want %q", got, want)
+	}
+}
+
+func TestHandlerDemoPageShadowsOnlyExactRoot(t *testing.T) {
+	up := echoUpstream(t, "api")
+	h := newDemoHandler(t, slog.New(slog.DiscardHandler), up.URL)
+
+	// A prefix match here would swallow the whole route table, which is
+	// the failure the exact-path check exists to prevent.
+	for _, path := range []string{"/demo/hello", "/burst/hello", "/anything"} {
+		r := httptest.NewRequest("GET", path, nil)
+		w := httptest.NewRecorder()
+		h.ServeHTTP(w, r)
+		if !strings.Contains(w.Body.String(), `"marker":"api"`) {
+			t.Errorf("GET %s did not reach the upstream (body %q)", path, w.Body.String())
+		}
+	}
+	// Health endpoints keep precedence over the page.
+	for _, path := range []string{"/healthz", "/readyz"} {
+		r := httptest.NewRequest("GET", path, nil)
+		w := httptest.NewRecorder()
+		h.ServeHTTP(w, r)
+		if ct := w.Header().Get("Content-Type"); strings.HasPrefix(ct, "text/html") {
+			t.Errorf("GET %s served the demo page", path)
+		}
+	}
+}
+
+func TestHandlerDemoPageMethodGuard(t *testing.T) {
+	up := echoUpstream(t, "api")
+	h := newDemoHandler(t, slog.New(slog.DiscardHandler), up.URL)
+
+	// A POST to "/" must not fall through to the upstream either - the
+	// page owns the path once it is enabled.
+	r := httptest.NewRequest("POST", "/", nil)
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, r)
+	if w.Code != http.StatusMethodNotAllowed {
+		t.Errorf("POST / = %d, want 405", w.Code)
+	}
+	if got := w.Header().Get("Allow"); got != "GET, HEAD" {
+		t.Errorf("Allow = %q, want %q", got, "GET, HEAD")
+	}
+	if strings.Contains(w.Body.String(), `"marker":"api"`) {
+		t.Error("POST / was proxied upstream")
+	}
+
+	// HEAD is allowed; net/http drops the body itself.
+	r = httptest.NewRequest("HEAD", "/", nil)
+	w = httptest.NewRecorder()
+	h.ServeHTTP(w, r)
+	if w.Code != http.StatusOK {
+		t.Errorf("HEAD / = %d, want 200", w.Code)
+	}
+}
+
+func TestHandlerDemoPageBypassesAccessLog(t *testing.T) {
+	up := echoUpstream(t, "api")
+	var buf bytes.Buffer
+	h := newDemoHandler(t, slog.New(slog.NewTextHandler(&buf, nil)), up.URL)
+
+	r := httptest.NewRequest("GET", "/", nil)
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, r)
+	if strings.Contains(buf.String(), "request") {
+		t.Errorf("serving the demo page was logged as a request: %s", buf.String())
+	}
+
+	// ...while a real proxied request still is, so the assertion above
+	// is about the bypass and not about a silent logger.
+	r = httptest.NewRequest("GET", "/demo/hello", nil)
+	w = httptest.NewRecorder()
+	h.ServeHTTP(w, r)
+	if !strings.Contains(buf.String(), "request") {
+		t.Error("proxied request was not access-logged")
 	}
 }

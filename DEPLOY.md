@@ -20,6 +20,11 @@ calls), redis up as uid 65532 with a 64 MB cap.
 and reject five, the `429` carries `retry-after` alongside the `x-ratelimit-*`
 trio, and `/metrics` is 404 over the public internet.
 
+The public instance also serves the demo page at `/` (`server.demo_page` in
+[`config.deploy.yaml`](config.deploy.yaml)). It is embedded in the binary, is
+answered ahead of the route table, and bypasses the limiter — a page that spent
+budget to load would misreport the number it exists to show.
+
 **Host-agnostic by construction.** `deploy` is the Dockerfile's *last* stage,
 so any host that builds a plain `Dockerfile` gets the right image without
 knowing about build targets. A candidate host needs exactly three things:
