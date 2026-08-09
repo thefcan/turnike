@@ -1,8 +1,8 @@
 # Deploying turnike
 
 turnike deploys as a **single-instance demo**: one container, one public
-service on `:8080`, with a **co-located plain redis** (`127.0.0.1:6379`, no
-auth) and a **co-located echo upstream** (`127.0.0.1:9000`) started by
+service on `:8080`, with a **co-located plain redis** (`/tmp/redis.sock`, no
+TCP, no auth) and a **co-located echo upstream** (`127.0.0.1:9000`) started by
 [`deploy/entrypoint.sh`](deploy/entrypoint.sh). It is a deliberate
 simplification of the multi-box topology in the README — that one is what
 `make demo` runs locally. No multi-region, no autoscaling, no custom domain.
@@ -148,15 +148,18 @@ curl -s $HOST/healthz    # -> ok
   in-memory limiting (`on_error: degrade`, real headers); if mock dies the
   routes 502; the platform restarts the container only when the foreground
   gateway exits. Acceptable for a demo.
-- **A recurring redis warning in Render's logs is expected.** Roughly once a
-  minute the app log carries redis's `# Possible SECURITY ATTACK detected...
-  Connection from 127.0.0.1:<port> aborted.` That is Render's in-container port
-  probe speaking HTTP at `127.0.0.1:6379`; redis's cross-protocol guard refuses
-  it, which is the guard working. Nothing off-box can reach redis — the
-  entrypoint binds it to `127.0.0.1` and Render publishes only the HTTP port.
-  Silencing it entirely means giving redis no TCP listener at all
-  (`--unixsocket /tmp/redis.sock --port 0`, with `limiter.redis.addr` set to
-  that path — go-redis picks `unix` for any addr starting with `/`).
+- **Redis has no TCP listener.** It serves `/tmp/redis.sock` (mode 0700, same
+  uid) with `--port 0`, and `limiter.redis.addr` is that path — go-redis dials
+  `unix` for any addr starting with `/`. This is why: Render probes its
+  container's open ports about once a minute to work out where to route, it
+  speaks HTTP at whatever it finds, and redis answers an HTTP verb on its wire
+  protocol with `# Possible SECURITY ATTACK detected`. That is the
+  cross-protocol guard doing its job, but it is also an alarming line, once a
+  minute, forever, in the log of a demo whose readers open logs. Removing the
+  listener removes the probe's target. Verified in the image: nothing listens
+  on 6379, `redis-cli -h 127.0.0.1 -p 6379` is refused, the socket answers
+  `PONG`, decisions still run as Lua (`INFO commandstats` shows `evalsha`),
+  and the log carries zero such warnings.
 
 - **Observability stays local.** `/metrics` is gated off the public port
   (`server.metrics_disabled: true` in [`config.deploy.yaml`](config.deploy.yaml))

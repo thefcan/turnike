@@ -88,6 +88,10 @@ type Limiter struct {
 
 // Redis holds connection settings for the redis backend.
 type Redis struct {
+	// Addr is "host:port", or an absolute path for a unix socket —
+	// go-redis picks the network from the leading "/". The socket form is
+	// what the single-container deploy uses, so redis needs no TCP
+	// listener at all.
 	Addr string `yaml:"addr"`
 	// OnError is the failure policy applied when redis cannot answer:
 	// one of fail_open, fail_closed or degrade (the default). See the
